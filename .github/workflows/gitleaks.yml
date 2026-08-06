@@ -2,14 +2,20 @@ name: gitleaks
 on:
   push:
   pull_request:
+
+permissions:
+  contents: read
+
 jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
       - name: Run gitleaks (secret scanning)
         run: |
-          curl -sSL https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz | tar -xz gitleaks
+          curl -sSLo gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.24.3/gitleaks_8.24.3_linux_x64.tar.gz
+          echo "9991e0b2903da4c8f6122b5c3186448b927a5da4deef1fe45271c3793f4ee29c  gitleaks.tgz" | sha256sum -c -
+          tar -xzf gitleaks.tgz gitleaks
           ./gitleaks detect --source . --verbose --redact
