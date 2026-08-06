@@ -1,0 +1,24 @@
+# ===== SECRETS — NEVER COMMIT =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*credentials*
+*secret*
+!**/secrets.example.*
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+coverage/
+*.tsbuildinfo
+npm-debug.log*
+pnpm-debug.log*
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
