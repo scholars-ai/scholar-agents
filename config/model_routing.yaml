@@ -1,0 +1,24 @@
+# 模型路由（ADR-002）：task → provider/model。切换模型改这里，代码零改动。
+# api_key_env 指向环境变量名——密钥永不入库（仓库硬性纪律）。
+providers:
+  anthropic:
+    protocol: anthropic
+    api_key_env: ANTHROPIC_API_KEY
+  deepseek:
+    protocol: openai
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  # 需要时解注释即可接入其他 OpenAI 兼容端点：
+  # kimi:
+  #   protocol: openai
+  #   base_url: https://api.moonshot.cn/v1
+  #   api_key_env: MOONSHOT_API_KEY
+
+tasks:
+  topic_scout: anthropic/claude-sonnet-5
+  topic_judge: anthropic/claude-sonnet-5
+  writer_outline: anthropic/claude-sonnet-5
+  writer_draft: anthropic/claude-sonnet-5
+  writer_self_critic: deepseek/deepseek-chat
+  article_judge: anthropic/claude-sonnet-5
+  reflector: anthropic/claude-opus-5
