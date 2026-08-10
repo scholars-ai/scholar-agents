@@ -111,7 +111,7 @@ def fetch_page_text(url: str, *, timeout: float = 45.0) -> str:
         return ""
 
 
-def _published_at(entry: dict[str, Any]) -> datetime | None:
+def published_at(entry: dict[str, Any]) -> datetime | None:
     for key in ("published_parsed", "updated_parsed"):
         st = entry.get(key)
         if not st:
@@ -154,6 +154,6 @@ def build_item(entry: dict[str, Any], *, role: Role, full_text: FullText) -> Fet
         url=link,
         author=(str(entry.get("author")) if entry.get("author") else None),
         content=content,
-        published_at=_published_at(entry),
+        published_at=published_at(entry),
         content_hash=content_hash,
     )

@@ -148,18 +148,48 @@ class TestMaxItemsCap:
     def test_config_overrides_cap(self) -> None:
         from scholar_agents.sourcing.handler import _source_config
         cfg = {"role": "material", "full_text": "rss_description", "max_items": 15}
-        assert _source_config({"fetch_config": cfg}) == ("material", "rss_description", 15)
+        c = _source_config({"fetch_config": cfg})
+        assert (c.role, c.full_text, c.max_items) == ("material", "rss_description", 15)
 
     def test_missing_config_uses_safe_defaults(self) -> None:
-        from scholar_agents.sourcing.handler import DEFAULT_MAX_ITEMS, _source_config
-        assert _source_config({}) == ("signal", "rss_description", DEFAULT_MAX_ITEMS)
+        from scholar_agents.sourcing.handler import (
+            DEFAULT_MAX_AGE_DAYS,
+            DEFAULT_MAX_ITEMS,
+            _source_config,
+        )
+        c = _source_config({})
+        assert (c.role, c.full_text) == ("signal", "rss_description")
+        assert c.max_items == DEFAULT_MAX_ITEMS
+        assert c.max_age_days == DEFAULT_MAX_AGE_DAYS
 
     def test_bad_cap_falls_back_to_default(self) -> None:
         from scholar_agents.sourcing.handler import DEFAULT_MAX_ITEMS, _source_config
-        _, _, cap = _source_config({"fetch_config": {"max_items": "not-a-number"}})
-        assert cap == DEFAULT_MAX_ITEMS
+        c = _source_config({"fetch_config": {"max_items": "nope"}})
+        assert c.max_items == DEFAULT_MAX_ITEMS
 
     def test_cap_is_at_least_one(self) -> None:
         from scholar_agents.sourcing.handler import _source_config
-        _, _, cap = _source_config({"fetch_config": {"max_items": 0}})
-        assert cap == 1
+        assert _source_config({"fetch_config": {"max_items": 0}}).max_items == 1
+
+
+class TestFreshnessWindow:
+    """OpenAI 的 news RSS 实测返回全部历史归档（1115 条，回溯数年），
+    必须按发布时间过滤，且要在 embedding 之前过滤以省额度。"""
+
+    def test_default_window_is_two_weeks(self) -> None:
+        from scholar_agents.sourcing import handler
+        assert handler.DEFAULT_MAX_AGE_DAYS == 14
+
+    def test_window_configurable_per_source(self) -> None:
+        from scholar_agents.sourcing.handler import _source_config
+        assert _source_config({"fetch_config": {"max_age_days": 90}}).max_age_days == 90
+
+    def test_bad_window_falls_back(self) -> None:
+        from scholar_agents.sourcing.handler import DEFAULT_MAX_AGE_DAYS, _source_config
+        c = _source_config({"fetch_config": {"max_age_days": "forever"}})
+        assert c.max_age_days == DEFAULT_MAX_AGE_DAYS
+
+    def test_published_at_helper_is_public(self) -> None:
+        """handler 依赖它做时效过滤，必须是稳定的公开 API。"""
+        from scholar_agents.sourcing.fetcher import published_at
+        assert published_at({}) is None

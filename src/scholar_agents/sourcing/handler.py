@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
@@ -26,6 +27,9 @@ from scholar_agents.sourcing.fetcher import (
     build_item,
     fetch_feed,
 )
+from scholar_agents.sourcing.fetcher import (
+    published_at as entry_published,
+)
 
 log = structlog.get_logger()
 
@@ -39,6 +43,13 @@ LOOKBACK_DAYS = 14
 #: feed 通常按时间倒序，取前 N 条即最新的 N 条。
 DEFAULT_MAX_ITEMS = 30
 
+#: 时效性窗口：早于此天数的条目直接丢弃，**不做 embedding**（省额度）。
+#: 必要性来自实测：OpenAI 的 news RSS 返回**全部历史归档**（单次 1115 条，
+#: 回溯数年），若不过滤会把多年前的旧闻灌进选题池。
+#: 这是比 max_items 更本质的约束 —— 选题系统要的是新鲜资讯。
+#: 可被 sources.fetch_config.max_age_days 覆盖（如常青教程类源可放宽）。
+DEFAULT_MAX_AGE_DAYS = 14
+
 
 @dataclass(slots=True)
 class SourcingStats:
@@ -47,6 +58,7 @@ class SourcingStats:
     dup_exact: int = 0
     dup_semantic: int = 0
     skipped: int = 0
+    too_old: int = 0
     failed: int = 0
 
     def as_dict(self) -> dict[str, int]:
@@ -56,24 +68,48 @@ class SourcingStats:
             "dup_exact": self.dup_exact,
             "dup_semantic": self.dup_semantic,
             "skipped": self.skipped,
+            "too_old": self.too_old,
             "failed": self.failed,
         }
 
 
-def _source_config(row: dict[str, Any]) -> tuple[Role, FullText, int]:
+@dataclass(slots=True)
+class SourceConfig:
+    role: Role
+    full_text: FullText
+    max_items: int
+    max_age_days: int
+
+
+def _positive_int(raw: object, default: int, field: str) -> int:
+    """读一个正整数配置项；非法值退回默认而不是让整轮采集崩掉。"""
+    if raw is None:
+        return default
+    if not isinstance(raw, int | str):
+        log.warning("bad_config_value", field=field, value=repr(raw), using=default)
+        return default
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        log.warning("bad_config_value", field=field, value=raw, using=default)
+        return default
+
+
+def _source_config(row: dict[str, Any]) -> SourceConfig:
     """从 sources.fetch_config 读配置，缺省保守取值（signal + 不抓页面 + 默认上限）。"""
     cfg = row.get("fetch_config") or {}
     role: Role = "material" if cfg.get("role") == "material" else "signal"
     full_text: FullText = (
         "fetch_page" if cfg.get("full_text") == "fetch_page" else "rss_description"
     )
-    raw_max = cfg.get("max_items")
-    try:
-        max_items = int(raw_max) if raw_max is not None else DEFAULT_MAX_ITEMS
-    except (TypeError, ValueError):
-        log.warning("bad_max_items", value=raw_max, using=DEFAULT_MAX_ITEMS)
-        max_items = DEFAULT_MAX_ITEMS
-    return role, full_text, max(1, max_items)
+    return SourceConfig(
+        role=role,
+        full_text=full_text,
+        max_items=_positive_int(cfg.get("max_items"), DEFAULT_MAX_ITEMS, "max_items"),
+        max_age_days=_positive_int(
+            cfg.get("max_age_days"), DEFAULT_MAX_AGE_DAYS, "max_age_days"
+        ),
+    )
 
 
 def _semantic_duplicate(
@@ -120,21 +156,30 @@ def handle_source_fetch(
     if not source["url"]:
         raise ValueError(f"source {source['name']} has no url")
 
-    role, full_text, max_items = _source_config(source)
+    cfg = _source_config(source)
+    role, full_text = cfg.role, cfg.full_text
     stats = SourcingStats()
     all_entries = fetch_feed(source["url"])  # 整个 feed 拉不动 → 抛 FetchError，由 worker 重试
-    entries = all_entries[:max_items]
-    if len(all_entries) > max_items:
+    entries = all_entries[: cfg.max_items]
+    if len(all_entries) > cfg.max_items:
         log.info(
             "feed_truncated",
             source=source["name"],
             total=len(all_entries),
-            taken=max_items,
+            taken=cfg.max_items,
         )
     stats.fetched = len(entries)
+    cutoff = datetime.now(UTC) - timedelta(days=cfg.max_age_days)
 
     for entry in entries:
         try:
+            # 时效性过滤放在 build_item 之前：早于窗口的条目连页面都不抓、
+            # 更不做 embedding（OpenAI 的 news RSS 实测回溯数年，1115 条历史归档）
+            published = entry_published(entry)
+            if published is not None and published < cutoff:
+                stats.too_old += 1
+                continue
+
             item = build_item(entry, role=role, full_text=full_text)
             if item is None:
                 stats.skipped += 1
