@@ -49,14 +49,16 @@ sources:
     url: http://export.arxiv.org/rss/cs.CL
     category: research
     weight: 0.7
-    fetch_config: { role: material, full_text: rss_description }
+    # arXiv 一次给出当天全部论文（实测 cs.CL 119 篇 / cs.AI 295 篇），
+    # 必须限量否则淹没选题池；feed 按时间倒序，取最新 15 篇
+    fetch_config: { role: material, full_text: rss_description, max_items: 15 }
 
   - name: arXiv cs.AI
     type: rss
     url: http://export.arxiv.org/rss/cs.AI
     category: research
     weight: 0.7
-    fetch_config: { role: material, full_text: rss_description }
+    fetch_config: { role: material, full_text: rss_description, max_items: 15 }
 
   - name: "The Verge: AI"
     type: rss

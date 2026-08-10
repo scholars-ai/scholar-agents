@@ -33,6 +33,12 @@ log = structlog.get_logger()
 SIMILARITY_THRESHOLD = 0.92
 LOOKBACK_DAYS = 14
 
+#: 单次采集的条目上限（可被 sources.fetch_config.max_items 覆盖）。
+#: 必要性来自实测：arXiv 的 RSS 一次给出当天全部论文（cs.AI 单次 295 篇、
+#: cs.CL 119 篇），两个源就能一天灌进 400+ 条，淹没选题池并浪费 embedding 额度。
+#: feed 通常按时间倒序，取前 N 条即最新的 N 条。
+DEFAULT_MAX_ITEMS = 30
+
 
 @dataclass(slots=True)
 class SourcingStats:
@@ -54,14 +60,20 @@ class SourcingStats:
         }
 
 
-def _source_config(row: dict[str, Any]) -> tuple[Role, FullText]:
-    """从 sources.fetch_config 读角色配置，缺省保守取值（signal + 不抓页面）。"""
+def _source_config(row: dict[str, Any]) -> tuple[Role, FullText, int]:
+    """从 sources.fetch_config 读配置，缺省保守取值（signal + 不抓页面 + 默认上限）。"""
     cfg = row.get("fetch_config") or {}
     role: Role = "material" if cfg.get("role") == "material" else "signal"
     full_text: FullText = (
         "fetch_page" if cfg.get("full_text") == "fetch_page" else "rss_description"
     )
-    return role, full_text
+    raw_max = cfg.get("max_items")
+    try:
+        max_items = int(raw_max) if raw_max is not None else DEFAULT_MAX_ITEMS
+    except (TypeError, ValueError):
+        log.warning("bad_max_items", value=raw_max, using=DEFAULT_MAX_ITEMS)
+        max_items = DEFAULT_MAX_ITEMS
+    return role, full_text, max(1, max_items)
 
 
 def _semantic_duplicate(
@@ -108,9 +120,17 @@ def handle_source_fetch(
     if not source["url"]:
         raise ValueError(f"source {source['name']} has no url")
 
-    role, full_text = _source_config(source)
+    role, full_text, max_items = _source_config(source)
     stats = SourcingStats()
-    entries = fetch_feed(source["url"])  # 整个 feed 拉不动 → 抛 FetchError，由 worker 重试
+    all_entries = fetch_feed(source["url"])  # 整个 feed 拉不动 → 抛 FetchError，由 worker 重试
+    entries = all_entries[:max_items]
+    if len(all_entries) > max_items:
+        log.info(
+            "feed_truncated",
+            source=source["name"],
+            total=len(all_entries),
+            taken=max_items,
+        )
     stats.fetched = len(entries)
 
     for entry in entries:

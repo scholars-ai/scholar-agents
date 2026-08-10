@@ -136,3 +136,30 @@ class TestFetchPageText:
         import httpx
         with patch("httpx.get", side_effect=httpx.ConnectError("nope")):
             assert fetcher.fetch_page_text("https://example.com/x") == ""
+
+
+class TestMaxItemsCap:
+    """arXiv 类源单次返回数百条（实测 cs.AI 295 篇 / cs.CL 119 篇），必须限量。"""
+
+    def test_default_cap_is_conservative(self) -> None:
+        from scholar_agents.sourcing import handler
+        assert handler.DEFAULT_MAX_ITEMS == 30
+
+    def test_config_overrides_cap(self) -> None:
+        from scholar_agents.sourcing.handler import _source_config
+        cfg = {"role": "material", "full_text": "rss_description", "max_items": 15}
+        assert _source_config({"fetch_config": cfg}) == ("material", "rss_description", 15)
+
+    def test_missing_config_uses_safe_defaults(self) -> None:
+        from scholar_agents.sourcing.handler import DEFAULT_MAX_ITEMS, _source_config
+        assert _source_config({}) == ("signal", "rss_description", DEFAULT_MAX_ITEMS)
+
+    def test_bad_cap_falls_back_to_default(self) -> None:
+        from scholar_agents.sourcing.handler import DEFAULT_MAX_ITEMS, _source_config
+        _, _, cap = _source_config({"fetch_config": {"max_items": "not-a-number"}})
+        assert cap == DEFAULT_MAX_ITEMS
+
+    def test_cap_is_at_least_one(self) -> None:
+        from scholar_agents.sourcing.handler import _source_config
+        _, _, cap = _source_config({"fetch_config": {"max_items": 0}})
+        assert cap == 1
