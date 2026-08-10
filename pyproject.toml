@@ -13,6 +13,9 @@ dependencies = [
     "structlog>=24.4",
     "jsonschema>=4.23",
     "scholar-contracts",
+    "feedparser>=6.0.14",
+    "trafilatura>=2.2.0",
+    "httpx>=0.28.1",
 ]
 
 [dependency-groups]
@@ -46,6 +49,11 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 strict = true
 packages = ["scholar_agents"]
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+# feedparser 无类型标注（无 py.typed）；它的返回值我们已在 fetcher 内部做了防御性取值
+module = ["feedparser", "trafilatura"]
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

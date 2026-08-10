@@ -1,0 +1,160 @@
+# 首批信源清单（SPEC-008 §9，2026-08-10 逐源实测）
+# 灌库：uv run python -m scholar_agents.cli seed-sources
+#
+# role:      material = 能拿到原文 / signal = 只有二手摘要（SPEC-003 §2.1）
+# full_text: rss_description = RSS 里已有足够正文 / fetch_page = 需抓原文页
+# weight:    信源质量初始权重，后续被反馈闭环校准（SPEC-006 §5）
+# rsshub_base 由环境变量 RSSHUB_BASE 注入（默认 http://127.0.0.1:1200）
+
+sources:
+  # ── A 层 material：RSS 自带全文（实测 12–28KB/条，写深度文章的主力素材）──
+  - name: MarkTechPost
+    type: rss
+    url: https://www.marktechpost.com/feed/
+    category: tutorial
+    weight: 0.75
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "Interconnects (Nathan Lambert)"
+    type: rss
+    url: https://www.interconnects.ai/feed
+    category: tutorial
+    weight: 0.85
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: GitHub Blog
+    type: rss
+    url: https://github.blog/feed/
+    category: news
+    weight: 0.65
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: NVIDIA Blog
+    type: rss
+    url: https://blogs.nvidia.com/feed/
+    category: news
+    weight: 0.6
+    fetch_config: { role: material, full_text: rss_description }
+
+  # ── A 层 material：RSS 带中等长度正文 ──
+  - name: IT之家
+    type: rsshub
+    url: "${RSSHUB_BASE}/ithome/it"
+    category: news
+    weight: 0.6
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: arXiv cs.CL
+    type: rss
+    url: http://export.arxiv.org/rss/cs.CL
+    category: research
+    weight: 0.7
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: arXiv cs.AI
+    type: rss
+    url: http://export.arxiv.org/rss/cs.AI
+    category: research
+    weight: 0.7
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "The Verge: AI"
+    type: rss
+    url: https://www.theverge.com/rss/ai-artificial-intelligence/index.xml
+    category: news
+    weight: 0.65
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "Ars Technica: AI"
+    type: rss
+    url: https://arstechnica.com/ai/feed/
+    category: news
+    weight: 0.65
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: The Decoder
+    type: rss
+    url: https://the-decoder.com/feed/
+    category: news
+    weight: 0.6
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: Apple Machine Learning Research
+    type: rss
+    url: https://machinelearning.apple.com/rss.xml
+    category: research
+    weight: 0.7
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: Google Developers Blog
+    type: rss
+    url: https://developers.googleblog.com/feeds/posts/default
+    category: tutorial
+    weight: 0.6
+    fetch_config: { role: material, full_text: rss_description }
+
+  # ── A 层 material：RSS 只给短摘要，需抓原文页 ──
+  - name: "TechCrunch: AI"
+    type: rss
+    url: https://techcrunch.com/category/artificial-intelligence/feed/
+    category: news
+    weight: 0.6
+    fetch_config: { role: material, full_text: fetch_page }
+
+  - name: OpenAI News
+    type: rss
+    url: https://openai.com/news/rss.xml
+    category: news
+    weight: 0.8
+    fetch_config: { role: material, full_text: fetch_page }
+
+  - name: Hacker News Frontpage
+    type: rss
+    url: https://hnrss.org/frontpage
+    category: news
+    weight: 0.5
+    fetch_config: { role: material, full_text: fetch_page }
+
+  # ── A 层 material：X 账号（RSSHub + 已配 TWITTER_AUTH_TOKEN，推文文本即原文）──
+  - name: "X: @OpenBMB"
+    type: rsshub
+    url: "${RSSHUB_BASE}/twitter/user/OpenBMB"
+    category: kol
+    weight: 0.6
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "X: @rohanpaul_ai"
+    type: rsshub
+    url: "${RSSHUB_BASE}/twitter/user/rohanpaul_ai"
+    category: kol
+    weight: 0.65
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "X: @bcherny"
+    type: rsshub
+    url: "${RSSHUB_BASE}/twitter/user/bcherny"
+    category: kol
+    weight: 0.7
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "X: @OpenAI"
+    type: rsshub
+    url: "${RSSHUB_BASE}/twitter/user/OpenAI"
+    category: kol
+    weight: 0.8
+    fetch_config: { role: material, full_text: rss_description }
+
+  - name: "X: @AISafetyMemes"
+    type: rsshub
+    url: "${RSSHUB_BASE}/twitter/user/AISafetyMemes"
+    category: kol
+    weight: 0.5
+    fetch_config: { role: material, full_text: rss_description }
+
+  # ── B 层 signal：聚合源兜底（覆盖 7 个公众号 + 抓不到的账号 + 跨源发现）──
+  - name: AIHOT 精选
+    type: rss
+    url: https://aihot.virxact.com/feed.xml
+    category: news
+    weight: 0.55
+    fetch_config: { role: signal, full_text: rss_description }
