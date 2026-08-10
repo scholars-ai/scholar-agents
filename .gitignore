@@ -22,3 +22,11 @@ pnpm-debug.log*
 .DS_Store
 .idea/
 .vscode/
+
+# Python bytecode (should not be committed)
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
