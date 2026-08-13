@@ -14,7 +14,7 @@ providers:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SF_API_KEY
     model_env: SILICONFLOW_MODEL
-    json_mode: object
+    json_mode: tool
   # 需要时解注释即可接入其他 OpenAI 兼容端点：
   # kimi:
   #   protocol: openai
@@ -22,8 +22,8 @@ providers:
   #   api_key_env: MOONSHOT_API_KEY
 
 tasks:
-  topic_scout: siliconflow/Qwen/Qwen2.5-7B-Instruct
-  topic_judge: siliconflow/Qwen/Qwen2.5-7B-Instruct
+  topic_scout: siliconflow/deepseek-ai/DeepSeek-V3
+  topic_judge: siliconflow/deepseek-ai/DeepSeek-V3
   writer_outline: anthropic/claude-sonnet-5
   writer_draft: anthropic/claude-sonnet-5
   writer_self_critic: deepseek/deepseek-chat

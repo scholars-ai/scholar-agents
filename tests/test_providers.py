@@ -162,6 +162,25 @@ class TestOpenAINormalization:
         kwargs = p._client.chat.completions.create.call_args.kwargs
         assert kwargs["response_format"] == {"type": "json_object"}
 
+    def test_tool_mode_forces_structured_tool_and_returns_json_text(self) -> None:
+        p = self._provider(
+            _openai_sdk_response(
+                None,
+                [_openai_tool_call("emit_structured_output", '{"ok": true}')],
+                "tool_calls",
+            )
+        )
+        p.json_mode = "tool"
+        resp = p.complete("qwen", REQ.model_copy(update={"json_schema": {"type": "object"}}))
+        kwargs = p._client.chat.completions.create.call_args.kwargs
+        assert kwargs["tools"][0]["function"]["name"] == "emit_structured_output"
+        assert kwargs["tool_choice"] == {
+            "type": "function",
+            "function": {"name": "emit_structured_output"},
+        }
+        assert resp.tool_calls == []
+        assert resp.text == '{"ok": true}'
+
     def test_system_goes_first_and_tool_result_is_tool_role(self) -> None:
         msgs = _to_openai_messages(
             [

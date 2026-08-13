@@ -61,8 +61,25 @@ class OpenAICompatProvider:
                 }
                 for t in req.tools
             ]
+        if req.json_schema is not None and self.json_mode == "tool":
+            kwargs["tools"] = [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "emit_structured_output",
+                        "description": "Return the required structured output.",
+                        "parameters": req.json_schema,
+                    },
+                }
+            ]
+            kwargs["tool_choice"] = {
+                "type": "function",
+                "function": {"name": "emit_structured_output"},
+            }
         if req.json_schema is not None:
-            if self.json_mode == "object":
+            if self.json_mode == "tool":
+                pass
+            elif self.json_mode == "object":
                 kwargs["response_format"] = {"type": "json_object"}
             else:
                 kwargs["response_format"] = {
@@ -75,7 +92,24 @@ class OpenAICompatProvider:
         resp = self._client.chat.completions.create(**kwargs)
         choice = resp.choices[0]
 
+        usage = Usage()
+        if resp.usage is not None:
+            usage = Usage(
+                input_tokens=resp.usage.prompt_tokens, output_tokens=resp.usage.completion_tokens
+            )
+
         content: list[ContentBlock] = []
+        if req.json_schema is not None and self.json_mode == "tool":
+            for tc in choice.message.tool_calls or []:
+                if tc.function.name == "emit_structured_output":
+                    content.append(TextBlock(text=tc.function.arguments))
+            return ChatResponse(
+                content=content,
+                stop_reason=_map_stop(choice.finish_reason),
+                usage=usage,
+                model=resp.model,
+                raw={"id": resp.id},
+            )
         if choice.message.content:
             content.append(TextBlock(text=choice.message.content))
         for tc in choice.message.tool_calls or []:
@@ -85,12 +119,6 @@ class OpenAICompatProvider:
             except json.JSONDecodeError:
                 args = {"__unparsed__": tc.function.arguments}
             content.append(ToolCallBlock(id=tc.id, name=tc.function.name, arguments=args))
-
-        usage = Usage()
-        if resp.usage is not None:
-            usage = Usage(
-                input_tokens=resp.usage.prompt_tokens, output_tokens=resp.usage.completion_tokens
-            )
 
         return ChatResponse(
             content=content,
