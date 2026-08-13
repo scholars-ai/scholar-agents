@@ -38,6 +38,7 @@ _PERMANENT_ERROR_MARKERS = (
     "invalid api key",
     "authentication",
     "unauthorized",
+    "is required for provider",
     "model not found",
 )
 
@@ -158,6 +159,10 @@ class Worker:
                 row = cur.fetchone()
             if row is None:
                 continue
+            # pgmq.read changes the message visibility inside the current
+            # transaction. Commit that claim before running the handler so a
+            # handler failure cannot roll it back and hot-loop the same job.
+            self._conn.commit()
             got = True
             msg_id, read_count, payload = row["msg_id"], row["read_ct"], row["message"]
             if isinstance(payload, str):  # psycopg 的 jsonb 通常已解码，防御字符串形态
