@@ -57,6 +57,8 @@ def test_targeted_scout_keeps_all_requested_items() -> None:
         ("invalid api key", True),
         ("model not found", True),
         ("env ANTHROPIC_API_KEY is required for provider 'anthropic'", True),
+        ("source Manual Feed has no url", True),
+        ("source source-1 not found", True),
         ("connection reset by peer", False),
     ],
 )

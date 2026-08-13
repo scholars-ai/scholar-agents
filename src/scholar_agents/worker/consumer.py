@@ -42,6 +42,9 @@ _PERMANENT_ERROR_MARKERS = (
     "unauthorized",
     "is required for provider",
     "model not found",
+    "source ",
+    " has no url",
+    " not found",
 )
 
 
