@@ -20,8 +20,10 @@ import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from scholar_agents.agents.judge import run_judge
 from scholar_agents.agents.scout import run_scout
 from scholar_agents.db_access import AgentRepository
+from scholar_agents.observability import ObservedProvider, TraceRecorder
 from scholar_agents.providers.router import ModelRouter
 from scholar_agents.sourcing.handler import handle_source_fetch
 
@@ -81,6 +83,13 @@ def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> N
 def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     router = ModelRouter.from_yaml(_routing_config_path())
     provider, model = router.resolve("topic_scout")
+    trace = TraceRecorder(name="topic-scout")
+    provider = ObservedProvider(
+        provider,
+        trace,
+        observation_name="topic-scout-structured",
+        prompt_version="topic-scout@v1",
+    )
     repository = AgentRepository(conn)
     max_topics = payload.get("maxTopics")
     run_scout(
@@ -89,18 +98,40 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
         model,
         repository,
         max_topics=int(max_topics) if max_topics is not None else None,
+        langfuse_trace_id=trace.trace_id,
     )
 
 
 @handler("topic_evaluate")
 def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
-    del conn, payload
-    # M1: TopicJudge —— 读取 rubric YAML + 生效权重，complete_structured 出分，写 topic_evaluations
-    raise NotImplementedError("M1: topic_evaluate")
+    topic_id = payload.get("topicId") or payload.get("topic_id")
+    if not topic_id:
+        raise ValueError("topic_evaluate payload requires topicId")
+    router = ModelRouter.from_yaml(_routing_config_path())
+    provider, model = router.resolve("topic_judge")
+    trace = TraceRecorder(name="topic-judge")
+    observed_provider = ObservedProvider(
+        provider,
+        trace,
+        observation_name="topic-judge-structured",
+        prompt_version="topic-judge@v1",
+    )
+    run_judge(
+        topic_id,
+        observed_provider,
+        model,
+        AgentRepository(conn),
+        _rubric_path(),
+        recorder=trace,
+    )
 
 
 def _routing_config_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "model_routing.yaml"
+
+
+def _rubric_path() -> Path:
+    return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v1.yaml"
 
 
 class Worker:

@@ -149,6 +149,7 @@ def run_scout(
     *,
     max_topics: int | None = None,
     embed_fn: EmbedFn | None = None,
+    langfuse_trace_id: str | None = None,
 ) -> ScoutResult:
     """运行一轮 TopicScout；调用方负责事务提交。"""
     if not items:
@@ -197,7 +198,7 @@ def run_scout(
             tokens_in=total_usage.input_tokens,
             tokens_out=total_usage.output_tokens,
             cost_usd=None,
-            langfuse_trace_id=None,
+            langfuse_trace_id=langfuse_trace_id,
             status="succeeded",
         )
     )

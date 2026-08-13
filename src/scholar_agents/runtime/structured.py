@@ -25,6 +25,10 @@ log = structlog.get_logger()
 class StructuredOutputError(Exception):
     """重试耗尽仍拿不到合法 JSON。"""
 
+    def __init__(self, message: str, usage: Usage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage or Usage()
+
 
 def complete_structured(
     provider: ModelProvider,
@@ -71,4 +75,6 @@ def complete_structured(
             )
         ]
 
-    raise StructuredOutputError(f"no valid structured output after {max_attempts} attempts")
+    raise StructuredOutputError(
+        f"no valid structured output after {max_attempts} attempts", total
+    )

@@ -139,3 +139,38 @@ class TestCompleteStructured:
         )
         with pytest.raises(StructuredOutputError):
             complete_structured(provider, "m", "sys", "rate", SCHEMA, max_attempts=3)
+
+
+def test_observed_provider_records_each_generation() -> None:
+    from scholar_agents.observability import ObservedProvider, TraceRecorder
+    from scholar_agents.providers.base import ChatRequest, ChatResponse, TextBlock, Usage
+
+    class Provider:
+        name = "fake"
+
+        def complete(self, model: str, req: ChatRequest) -> ChatResponse:
+            del model, req
+            return ChatResponse(
+                content=[TextBlock(text="ok")],
+                stop_reason="end_turn",
+                usage=Usage(input_tokens=3, output_tokens=4),
+                model="fake-model",
+            )
+
+    class Recorder(TraceRecorder):
+        def __init__(self) -> None:
+            super().__init__(trace_id="trace-r-1")
+            self.calls = 0
+
+        def generation(self, **kwargs: object) -> None:
+            del kwargs
+            self.calls += 1
+
+    recorder = Recorder()
+    provider = ObservedProvider(
+        Provider(), recorder, observation_name="test", prompt_version="x@v1"
+    )
+    provider.complete("fake-model", ChatRequest(messages=[]))
+    provider.complete("fake-model", ChatRequest(messages=[]))
+
+    assert recorder.calls == 2
