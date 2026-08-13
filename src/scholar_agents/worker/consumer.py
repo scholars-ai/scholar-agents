@@ -32,7 +32,7 @@ log = structlog.get_logger()
 
 # 同一个 job 最多执行三次；供应商配额/认证类错误不应进入 visibility timeout 重试。
 MAX_JOB_ATTEMPTS = 3
-DEFAULT_SCOUT_MAX_ITEMS = 20
+DEFAULT_SCOUT_MAX_ITEMS = 5
 _PERMANENT_ERROR_MARKERS = (
     "quota",
     "rate limit",
