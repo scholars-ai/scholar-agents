@@ -32,6 +32,7 @@ log = structlog.get_logger()
 
 # 同一个 job 最多执行三次；供应商配额/认证类错误不应进入 visibility timeout 重试。
 MAX_JOB_ATTEMPTS = 3
+DEFAULT_SCOUT_MAX_ITEMS = 20
 _PERMANENT_ERROR_MARKERS = (
     "quota",
     "rate limit",
@@ -98,6 +99,14 @@ def _manual_scout_payload(
     return {"rawItemIds": item_ids}
 
 
+def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
+    """Bound scheduled Scout work while preserving targeted manual ingest."""
+    if raw_item_ids:
+        return len(raw_item_ids)
+    value = payload.get("maxItems", DEFAULT_SCOUT_MAX_ITEMS)
+    return int(value)
+
+
 @handler("topic_scout")
 def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     router = ModelRouter.from_yaml(_routing_config_path())
@@ -112,11 +121,10 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     )
     repository = AgentRepository(conn)
     max_topics = payload.get("maxTopics")
-    max_items = payload.get("maxItems")
     raw_item_ids = [UUID(str(value)) for value in payload.get("rawItemIds", [])]
     run_scout(
         repository.list_new_raw_items(
-            limit=int(max_items) if max_items is not None else 100,
+            limit=_scout_item_limit(payload, raw_item_ids),
             raw_item_ids=raw_item_ids or None,
         ),
         provider,

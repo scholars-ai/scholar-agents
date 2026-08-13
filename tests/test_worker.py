@@ -32,6 +32,23 @@ def test_non_manual_source_fetch_does_not_build_targeted_scout_payload() -> None
     assert _manual_scout_payload({"sourceId": "source-1"}, ["item-1"]) is None
 
 
+def test_scheduled_scout_has_bounded_default_item_batch() -> None:
+    from scholar_agents.worker.consumer import _scout_item_limit
+
+    assert _scout_item_limit({}, []) == 20
+    assert _scout_item_limit({"maxItems": 7}, []) == 7
+
+
+def test_targeted_scout_keeps_all_requested_items() -> None:
+    from uuid import uuid4
+
+    from scholar_agents.worker.consumer import _scout_item_limit
+
+    item_ids = [uuid4(), uuid4(), uuid4()]
+
+    assert _scout_item_limit({}, item_ids) == len(item_ids)
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [
