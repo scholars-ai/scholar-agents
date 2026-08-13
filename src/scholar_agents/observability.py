@@ -40,12 +40,16 @@ class TraceRecorder:
             return
         now = datetime.now(UTC).isoformat()
         input_payload = _request_payload(request)
+        metadata: dict[str, Any] = {}
+        if prompt_version:
+            metadata["promptVersion"] = prompt_version
         body: dict[str, Any] = {
             "id": str(uuid4()),
             "traceId": self.trace_id,
             "name": observation_name,
             "startTime": now,
             "endTime": now,
+            "completionStartTime": now,
             "model": response.model or model,
             "input": input_payload,
             "output": response.raw or response.text,
@@ -61,9 +65,8 @@ class TraceRecorder:
                 "total": response.usage.input_tokens + response.usage.output_tokens,
             },
         }
-        if prompt_version:
-            body["promptName"] = prompt_version.split("@", 1)[0]
-            body["promptVersion"] = prompt_version.split("@", 1)[-1]
+        if metadata:
+            body["metadata"] = metadata
         self._send("generation-create", body)
 
     def trace(self, *, input_payload: Any = None, metadata: dict[str, Any] | None = None) -> None:
@@ -91,9 +94,15 @@ class TraceRecorder:
 
     def _send(self, event_type: str, body: dict[str, Any]) -> None:
         try:
+            event = {
+                "id": str(uuid4()),
+                "type": event_type,
+                "timestamp": datetime.now(UTC).isoformat(),
+                "body": body,
+            }
             response = httpx.post(
                 f"{self._host}/api/public/ingestion",
-                json={"batch": [{"id": str(uuid4()), "type": event_type, "body": body}]},
+                json={"batch": [event]},
                 auth=(self._public_key or "", self._secret_key or ""),
                 timeout=10,
             )

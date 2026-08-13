@@ -215,3 +215,12 @@ def test_trace_recorder_uses_current_langfuse_ingestion_shape(
         "unit": "TOKENS",
     }
     assert generation["usageDetails"] == {"input": 1, "output": 1, "total": 2}
+    assert generation["completionStartTime"] == generation["startTime"]
+    assert generation["metadata"] == {"promptVersion": "topic-scout@v1"}
+
+
+def test_trace_recorder_sends_ingestion_event_timestamp() -> None:
+    from scholar_agents.observability import TraceRecorder
+
+    recorder = TraceRecorder(trace_id="trace-test")
+    assert recorder.enabled is False

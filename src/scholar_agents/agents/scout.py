@@ -16,7 +16,7 @@ from scholar_contracts.models import TopicDraft, TopicScoutOutput
 from scholar_agents.db_access import AgentRunInsert, RawItemRecord
 from scholar_agents.embedding import cosine
 from scholar_agents.providers.base import ModelProvider, Usage
-from scholar_agents.runtime.structured import complete_structured
+from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
 DEFAULT_CLUSTER_THRESHOLD = 0.80
 
@@ -159,49 +159,84 @@ def run_scout(
     created_topics = 0
     total_usage = Usage()
     clusters = cluster_raw_items(items)
-    for cluster in clusters:
-        system, user = build_scout_prompt(cluster)
-        data, usage = complete_structured(
-            provider,
-            model,
-            system,
-            user,
-            TopicScoutOutput.model_json_schema(),
-        )
-        total_usage.input_tokens += usage.input_tokens
-        total_usage.output_tokens += usage.output_tokens
-        drafts = parse_scout_output(data, cluster)
-        for draft in drafts:
-            if max_topics is not None and created_topics >= max_topics:
-                break
-            topic_embedding = embedder(f"{draft.title}\n\n{draft.angle}\n\n{draft.summary}")
-            if repository.find_similar_topic(topic_embedding) is not None:
-                continue
-            repository.create_topic(
-                title=draft.title,
-                angle=draft.angle,
-                summary=draft.summary,
-                raw_item_ids=draft.rawItemIds,
-                target_platforms=[platform.value for platform in draft.targetPlatforms],
-                embedding=topic_embedding,
+    try:
+        for cluster in clusters:
+            system, user = build_scout_prompt(cluster)
+            data, usage = complete_structured(
+                provider,
+                model,
+                system,
+                user,
+                TopicScoutOutput.model_json_schema(),
             )
-            created_topics += 1
-        repository.mark_raw_items_clustered([item.id for item in cluster])
-
-    repository.create_agent_run(
-        AgentRunInsert(
-            job_type="topic.scout",
-            entity_type="raw_item_cluster",
-            entity_id=None,
-            model=model,
-            prompt_version="topic-scout@v1",
-            tokens_in=total_usage.input_tokens,
-            tokens_out=total_usage.output_tokens,
-            cost_usd=None,
-            langfuse_trace_id=langfuse_trace_id,
-            status="succeeded",
+            total_usage.input_tokens += usage.input_tokens
+            total_usage.output_tokens += usage.output_tokens
+            drafts = parse_scout_output(data, cluster)
+            for draft in drafts:
+                if max_topics is not None and created_topics >= max_topics:
+                    break
+                topic_embedding = embedder(f"{draft.title}\n\n{draft.angle}\n\n{draft.summary}")
+                if repository.find_similar_topic(topic_embedding) is not None:
+                    continue
+                repository.create_topic(
+                    title=draft.title,
+                    angle=draft.angle,
+                    summary=draft.summary,
+                    raw_item_ids=draft.rawItemIds,
+                    target_platforms=[platform.value for platform in draft.targetPlatforms],
+                    embedding=topic_embedding,
+                )
+                created_topics += 1
+            repository.mark_raw_items_clustered([item.id for item in cluster])
+    except StructuredOutputError as exc:
+        total_usage.input_tokens += exc.usage.input_tokens
+        total_usage.output_tokens += exc.usage.output_tokens
+        repository.create_agent_run(
+            AgentRunInsert(
+                job_type="topic.scout",
+                entity_type="raw_item_cluster",
+                entity_id=None,
+                model=model,
+                prompt_version="topic-scout@v1",
+                tokens_in=total_usage.input_tokens,
+                tokens_out=total_usage.output_tokens,
+                cost_usd=None,
+                langfuse_trace_id=langfuse_trace_id,
+                status="failed",
+            )
         )
-    )
+        raise
+    except Exception:
+        repository.create_agent_run(
+            AgentRunInsert(
+                job_type="topic.scout",
+                entity_type="raw_item_cluster",
+                entity_id=None,
+                model=model,
+                prompt_version="topic-scout@v1",
+                tokens_in=total_usage.input_tokens,
+                tokens_out=total_usage.output_tokens,
+                cost_usd=None,
+                langfuse_trace_id=langfuse_trace_id,
+                status="failed",
+            )
+        )
+        raise
+    else:
+        repository.create_agent_run(
+            AgentRunInsert(
+                job_type="topic.scout",
+                entity_type="raw_item_cluster",
+                entity_id=None,
+                model=model,
+                prompt_version="topic-scout@v1",
+                tokens_in=total_usage.input_tokens,
+                tokens_out=total_usage.output_tokens,
+                cost_usd=None,
+                langfuse_trace_id=langfuse_trace_id,
+                status="succeeded",
+            )
+        )
     return ScoutResult(
         created_topics=created_topics,
         clusters_processed=len(clusters),
