@@ -13,11 +13,17 @@ import os
 import signal
 import types
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
+
+from scholar_agents.agents.scout import run_scout
+from scholar_agents.db_access import AgentRepository
+from scholar_agents.providers.router import ModelRouter
+from scholar_agents.sourcing.handler import handle_source_fetch
 
 log = structlog.get_logger()
 
@@ -54,7 +60,7 @@ def should_retry(exc: BaseException, read_count: int) -> bool:
 
 
 # 队列名以 scholar-shared/schemas/queues.json 为准
-Handler = Callable[[dict[str, Any]], None]
+Handler = Callable[[Connection[Any], dict[str, Any]], None]
 HANDLERS: dict[str, Handler] = {}
 
 
@@ -66,10 +72,35 @@ def handler(queue: str) -> Callable[[Handler], Handler]:
     return register
 
 
+@handler("source_fetch")
+def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    handle_source_fetch(conn, payload)
+
+
+@handler("topic_scout")
+def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    router = ModelRouter.from_yaml(_routing_config_path())
+    provider, model = router.resolve("topic_scout")
+    repository = AgentRepository(conn)
+    max_topics = payload.get("maxTopics")
+    run_scout(
+        repository.list_new_raw_items(),
+        provider,
+        model,
+        repository,
+        max_topics=int(max_topics) if max_topics is not None else None,
+    )
+
+
 @handler("topic_evaluate")
-def handle_topic_evaluate(payload: dict[str, Any]) -> None:
+def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    del conn, payload
     # M1: TopicJudge —— 读取 rubric YAML + 生效权重，complete_structured 出分，写 topic_evaluations
     raise NotImplementedError("M1: topic_evaluate")
+
+
+def _routing_config_path() -> Path:
+    return Path(__file__).resolve().parents[3] / "config" / "model_routing.yaml"
 
 
 class Worker:
@@ -99,7 +130,7 @@ class Worker:
                 payload = json.loads(payload)
             log.info("job_start", queue=queue, msg_id=msg_id)
             try:
-                fn(payload)
+                fn(self._conn, payload)
             except Exception as exc:  # noqa: BLE001 — worker 边界必须兜住 job 异常
                 retry = should_retry(exc, read_count)
                 log.exception(

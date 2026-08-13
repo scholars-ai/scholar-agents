@@ -28,6 +28,7 @@ def test_raw_item_record_keeps_source_context_for_scout() -> None:
             "published_at": published_at,
             "source_name": "Example",
             "source_weight": 0.8,
+            "embedding": [1.0, 0.0],
         }
     )
 
@@ -36,6 +37,7 @@ def test_raw_item_record_keeps_source_context_for_scout() -> None:
     assert item.source_name == "Example"
     assert item.source_weight == 0.8
     assert item.published_at == published_at
+    assert item.embedding == [1.0, 0.0]
 
 
 def test_topic_record_builds_judge_context_from_joined_row() -> None:

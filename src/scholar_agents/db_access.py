@@ -37,6 +37,19 @@ def _optional_float(value: object) -> float | None:
     return float(str(value))
 
 
+def _embedding(value: object) -> list[float] | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return [float(item) for item in value]
+    values = getattr(value, "to_list", None)
+    if callable(values):
+        return [float(item) for item in values()]
+    if isinstance(value, str):
+        return [float(item) for item in value.strip("[]").split(",") if item]
+    raise TypeError(f"unsupported embedding value: {type(value).__name__}")
+
+
 @dataclass(frozen=True, slots=True)
 class RawItemRecord:
     id: UUID
@@ -48,6 +61,7 @@ class RawItemRecord:
     published_at: datetime | None
     source_name: str
     source_weight: float
+    embedding: list[float] | None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> RawItemRecord:
@@ -61,6 +75,7 @@ class RawItemRecord:
             published_at=row.get("published_at"),
             source_name=str(row.get("source_name") or ""),
             source_weight=float(row.get("source_weight") or 0),
+            embedding=_embedding(row.get("embedding")),
         )
 
 
@@ -147,7 +162,7 @@ class AgentRepository:
             cur.execute(
                 """
                 select r.id, r.source_id, r.title, r.url, r.author, r.content,
-                       r.published_at, s.name as source_name, s.weight as source_weight
+                       r.published_at, r.embedding, s.name as source_name, s.weight as source_weight
                 from raw_items r
                 join sources s on s.id = r.source_id
                 where r.status = 'new'
@@ -180,7 +195,7 @@ class AgentRepository:
             cur.execute(
                 """
                 select r.id, r.source_id, r.title, r.url, r.author, r.content,
-                       r.published_at, s.name as source_name, s.weight as source_weight
+                       r.published_at, r.embedding, s.name as source_name, s.weight as source_weight
                 from raw_items r
                 join sources s on s.id = r.source_id
                 where r.id = any(%s)

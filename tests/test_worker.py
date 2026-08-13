@@ -3,11 +3,16 @@ from __future__ import annotations
 import pytest
 
 from scholar_agents.worker.consumer import (
+    HANDLERS,
     MAX_JOB_ATTEMPTS,
     PermanentJobError,
     is_permanent_error,
     should_retry,
 )
+
+
+def test_m1_handlers_are_registered() -> None:
+    assert {"source_fetch", "topic_scout", "topic_evaluate"}.issubset(HANDLERS)
 
 
 @pytest.mark.parametrize(

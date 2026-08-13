@@ -52,7 +52,7 @@ mypy_path = "src"
 
 [[tool.mypy.overrides]]
 # feedparser 无类型标注（无 py.typed）；它的返回值我们已在 fetcher 内部做了防御性取值
-module = ["feedparser", "trafilatura"]
+module = ["feedparser", "trafilatura", "scholar_contracts.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
