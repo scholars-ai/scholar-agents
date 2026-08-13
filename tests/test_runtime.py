@@ -230,3 +230,35 @@ def test_trace_recorder_sends_ingestion_event_timestamp() -> None:
 
     recorder = TraceRecorder(trace_id="trace-test")
     assert recorder.enabled is False
+
+
+def test_trace_recorder_retries_temporary_ingestion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    import scholar_agents.observability as observability
+
+    recorder = observability.TraceRecorder(trace_id="trace-retry")
+    monkeypatch.setattr(recorder, "_host", "http://langfuse")
+    monkeypatch.setattr(recorder, "_public_key", "pk-test")
+    monkeypatch.setattr(recorder, "_secret_key", "sk-test")
+    attempts = 0
+
+    def post(*args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise httpx.ConnectError("temporary outage")
+
+        class Response:
+            def raise_for_status(self) -> None:
+                return None
+
+        return Response()
+
+    monkeypatch.setattr(observability.httpx, "post", post)
+
+    recorder.score(name="topic_total_score", value=80.0)
+
+    assert attempts == 3

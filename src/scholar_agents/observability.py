@@ -13,6 +13,7 @@ import structlog
 from scholar_agents.providers.base import ChatRequest, ChatResponse, ModelProvider
 
 log = structlog.get_logger()
+INGESTION_ATTEMPTS = 3
 
 
 class TraceRecorder:
@@ -95,22 +96,30 @@ class TraceRecorder:
         self._send("score-create", body)
 
     def _send(self, event_type: str, body: dict[str, Any]) -> None:
-        try:
-            event = {
-                "id": str(uuid4()),
-                "type": event_type,
-                "timestamp": datetime.now(UTC).isoformat(),
-                "body": body,
-            }
-            response = httpx.post(
-                f"{self._host}/api/public/ingestion",
-                json={"batch": [event]},
-                auth=(self._public_key or "", self._secret_key or ""),
-                timeout=10,
-            )
-            response.raise_for_status()
-        except Exception as exc:  # noqa: BLE001 — 观测系统故障不应阻断业务 job
-            log.warning("langfuse_write_failed", trace_id=self.trace_id, error=str(exc))
+        event = {
+            "id": str(uuid4()),
+            "type": event_type,
+            "timestamp": datetime.now(UTC).isoformat(),
+            "body": body,
+        }
+        for attempt in range(1, INGESTION_ATTEMPTS + 1):
+            try:
+                response = httpx.post(
+                    f"{self._host}/api/public/ingestion",
+                    json={"batch": [event]},
+                    auth=(self._public_key or "", self._secret_key or ""),
+                    timeout=10,
+                )
+                response.raise_for_status()
+                return
+            except Exception as exc:  # noqa: BLE001 — 观测系统故障不应阻断业务 job
+                if attempt == INGESTION_ATTEMPTS:
+                    log.warning(
+                        "langfuse_write_failed",
+                        trace_id=self.trace_id,
+                        attempts=attempt,
+                        error=str(exc),
+                    )
 
 
 class ObservedProvider:
