@@ -262,3 +262,31 @@ def test_trace_recorder_retries_temporary_ingestion_failure(
     recorder.score(name="topic_total_score", value=80.0)
 
     assert attempts == 3
+
+
+def test_trace_recorder_does_not_retry_ingestion_client_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+
+    import scholar_agents.observability as observability
+
+    recorder = observability.TraceRecorder(trace_id="trace-client-error")
+    monkeypatch.setattr(recorder, "_host", "http://langfuse")
+    monkeypatch.setattr(recorder, "_public_key", "pk-test")
+    monkeypatch.setattr(recorder, "_secret_key", "sk-test")
+    attempts = 0
+    request = httpx.Request("POST", "http://langfuse/api/public/ingestion")
+
+    def post(*args: object, **kwargs: object) -> object:
+        nonlocal attempts
+        attempts += 1
+        response = httpx.Response(401, request=request)
+        response.raise_for_status()
+        return response
+
+    monkeypatch.setattr(observability.httpx, "post", post)
+
+    recorder.score(name="topic_total_score", value=80.0)
+
+    assert attempts == 1

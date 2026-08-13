@@ -113,6 +113,14 @@ class TraceRecorder:
                 response.raise_for_status()
                 return
             except Exception as exc:  # noqa: BLE001 — 观测系统故障不应阻断业务 job
+                if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code < 500:
+                    log.warning(
+                        "langfuse_write_failed",
+                        trace_id=self.trace_id,
+                        attempts=attempt,
+                        error=str(exc),
+                    )
+                    return
                 if attempt == INGESTION_ATTEMPTS:
                     log.warning(
                         "langfuse_write_failed",
