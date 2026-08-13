@@ -35,7 +35,7 @@ def test_non_manual_source_fetch_does_not_build_targeted_scout_payload() -> None
 def test_scheduled_scout_has_bounded_default_item_batch() -> None:
     from scholar_agents.worker.consumer import _scout_item_limit
 
-    assert _scout_item_limit({}, []) == 5
+    assert _scout_item_limit({}, []) == 20
     assert _scout_item_limit({"maxItems": 7}, []) == 7
 
 
