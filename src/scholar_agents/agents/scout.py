@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
@@ -119,8 +120,24 @@ def build_scout_prompt(items: list[RawItemRecord]) -> tuple[str, str]:
 如果属于同一事件，最多输出 1–3 个不同创作角度。
 每个角度必须引用输入素材中的 rawItemIds，只能建议 xiaohongshu、zhihu、wechat 平台。
 输出必须符合 TopicScoutOutput schema，字段名使用 rawItemIds 和 targetPlatforms。"""
-    user = f"请分析以下素材簇：\n\n{format_cluster_context(items)}"
+    allowed_ids = "、".join(str(item.id) for item in items)
+    user = (
+        f"请分析以下素材簇。rawItemIds 只能从这个列表中选择：{allowed_ids}\n\n"
+        f"{format_cluster_context(items)}"
+    )
     return system, user
+
+
+def scout_output_schema(items: list[RawItemRecord]) -> dict[str, Any]:
+    """把当前素材簇的 ID 集合约束注入结构化输出 schema。"""
+    schema = deepcopy(TopicScoutOutput.model_json_schema())
+    raw_item_ids = schema["$defs"]["TopicDraft"]["properties"]["rawItemIds"]
+    raw_item_ids["items"] = {
+        "type": "string",
+        "format": "uuid",
+        "enum": [str(item.id) for item in items],
+    }
+    return schema
 
 
 def parse_scout_output(data: dict[str, Any], items: list[RawItemRecord]) -> list[TopicDraft]:
@@ -167,7 +184,7 @@ def run_scout(
                 model,
                 system,
                 user,
-                TopicScoutOutput.model_json_schema(),
+                scout_output_schema(cluster),
             )
             total_usage.input_tokens += usage.input_tokens
             total_usage.output_tokens += usage.output_tokens

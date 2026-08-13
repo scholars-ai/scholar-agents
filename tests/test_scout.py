@@ -12,6 +12,7 @@ from scholar_agents.agents.scout import (
     format_cluster_context,
     parse_scout_output,
     run_scout,
+    scout_output_schema,
 )
 from scholar_agents.db_access import RawItemRecord
 from scholar_agents.providers.base import ChatResponse, TextBlock, Usage
@@ -89,6 +90,15 @@ def test_build_scout_prompt_requires_event_judgment_and_limits_drafts() -> None:
     assert "1–3" in system
     assert "模型发布" in user
     assert "rawItemIds" in system
+
+
+def test_scout_output_schema_limits_raw_item_ids_to_input_cluster() -> None:
+    items = [_item("模型发布 A", [1.0, 0.0]), _item("模型发布 B", [0.99, 0.1])]
+
+    schema = scout_output_schema(items)
+
+    raw_item_schema = schema["$defs"]["TopicDraft"]["properties"]["rawItemIds"]
+    assert raw_item_schema["items"]["enum"] == [str(item.id) for item in items]
 
 
 def test_parse_scout_output_rejects_raw_item_id_outside_cluster() -> None:
