@@ -87,3 +87,24 @@ def test_worker_keeps_failed_message_claim_until_visibility_timeout(
     assert Worker(conn, visibility_timeout=30).poll_once()
     assert conn.commits == 1
     assert conn.rollbacks == 1
+
+
+def test_worker_connection_uses_dict_rows(monkeypatch: pytest.MonkeyPatch) -> None:
+    from scholar_agents.worker import consumer
+
+    calls: list[dict[str, object]] = []
+
+    class FakeConnectionContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def fake_connect(dsn: str, **kwargs: object) -> FakeConnectionContext:
+        calls.append({"dsn": dsn, **kwargs})
+        return FakeConnectionContext()
+
+    monkeypatch.setattr(consumer.Connection, "connect", staticmethod(fake_connect))
+    assert consumer._connect_worker_database("postgres://test") is not None
+    assert calls == [{"dsn": "postgres://test", "row_factory": consumer.dict_row}]

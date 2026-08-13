@@ -138,6 +138,10 @@ def _rubric_path() -> Path:
     return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v1.yaml"
 
 
+def _connect_worker_database(dsn: str) -> Connection[Any]:
+    return Connection.connect(dsn, row_factory=dict_row)
+
+
 class Worker:
     def __init__(self, conn: Connection[Any], visibility_timeout: int = 300) -> None:
         self._conn = conn
@@ -199,7 +203,7 @@ def main() -> None:
         raise SystemExit("DATABASE_URL is required")
     import time
 
-    with Connection.connect(dsn) as conn:
+    with _connect_worker_database(dsn) as conn:
         worker = Worker(conn)
         signal.signal(signal.SIGINT, worker.stop)
         signal.signal(signal.SIGTERM, worker.stop)
