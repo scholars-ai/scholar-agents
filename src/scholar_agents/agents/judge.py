@@ -21,6 +21,7 @@ from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
 RUBRIC_VERSION = "topic@v1"
+PROMPT_VERSION = "topic-judge@v1"
 
 
 class TopicJudgeError(ValueError):
@@ -114,7 +115,7 @@ def run_judge(
             entity_type="topic",
             entity_id=topic.id,
             model=model,
-            prompt_version=RUBRIC_VERSION,
+            prompt_version=PROMPT_VERSION,
             tokens_in=0,
             tokens_out=0,
             cost_usd=None,
@@ -156,7 +157,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
-                prompt_version=RUBRIC_VERSION,
+                prompt_version=PROMPT_VERSION,
                 tokens_in=usage.input_tokens,
                 tokens_out=usage.output_tokens,
                 cost_usd=None,
@@ -174,7 +175,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
-                prompt_version=RUBRIC_VERSION,
+                prompt_version=PROMPT_VERSION,
                 tokens_in=exc.usage.input_tokens,
                 tokens_out=exc.usage.output_tokens,
                 cost_usd=None,
@@ -191,7 +192,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
-                prompt_version=RUBRIC_VERSION,
+                prompt_version=PROMPT_VERSION,
                 tokens_in=None,
                 tokens_out=None,
                 cost_usd=None,

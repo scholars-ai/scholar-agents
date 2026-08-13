@@ -6,6 +6,7 @@ from uuid import uuid4
 import pytest
 
 from scholar_agents.agents.judge import (
+    PROMPT_VERSION,
     RUBRIC_VERSION,
     TopicJudgeError,
     build_judge_prompt,
@@ -208,5 +209,7 @@ def test_run_judge_recomputes_and_persists_score() -> None:
     assert result.usage.output_tokens == 34
     assert repository.evaluations[0].weight_version == 7
     assert repository.evaluations[0].vetoed_dimension is None
+    assert repository.runs[0].prompt_version == PROMPT_VERSION
+    assert repository.updates[-1][1].prompt_version == PROMPT_VERSION
     assert repository.updates[-1][1].status == "succeeded"
     assert trace.scores == [("topic_total_score", 50.0)]
