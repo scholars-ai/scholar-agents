@@ -176,10 +176,14 @@ def run_scout(
 
     embedder = embed_fn or _default_embed
     created_topics = 0
+    clusters_processed = 0
     total_usage = Usage()
     clusters = cluster_raw_items(items)
     try:
         for cluster in clusters:
+            if max_topics is not None and created_topics >= max_topics:
+                break
+            clusters_processed += 1
             system, user = build_scout_prompt(cluster)
             data, usage = complete_structured(
                 provider,
@@ -258,7 +262,7 @@ def run_scout(
         )
     return ScoutResult(
         created_topics=created_topics,
-        clusters_processed=len(clusters),
+        clusters_processed=clusters_processed,
         usage=total_usage,
     )
 

@@ -276,3 +276,40 @@ def test_run_scout_does_not_write_duplicate_topic() -> None:
     assert result.created_topics == 0
     assert repository.created_topics == []
     assert repository.clustered == [item.id]
+
+
+def test_run_scout_stops_processing_clusters_at_max_topics() -> None:
+    first = _item("第一个事件", [1.0, 0.0])
+    second = _item("第二个事件", [0.0, 1.0])
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "topics": [
+                        {
+                            "title": "第一个选题",
+                            "angle": "角度",
+                            "summary": "摘要",
+                            "rawItemIds": [str(first.id)],
+                            "targetPlatforms": ["zhihu"],
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    repository = FakeRepository()
+
+    result = run_scout(
+        [first, second],
+        provider,
+        "fake-model",
+        repository,
+        max_topics=1,
+        embed_fn=lambda text: [1.0, 0.0],
+    )
+
+    assert result.created_topics == 1
+    assert result.clusters_processed == 1
+    assert provider.calls == 1
+    assert repository.clustered == [first.id]
