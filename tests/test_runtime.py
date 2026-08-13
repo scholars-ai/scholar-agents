@@ -174,3 +174,44 @@ def test_observed_provider_records_each_generation() -> None:
     provider.complete("fake-model", ChatRequest(messages=[]))
 
     assert recorder.calls == 2
+
+
+def test_trace_recorder_uses_current_langfuse_ingestion_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import scholar_agents.observability as observability
+
+    recorder = observability.TraceRecorder(trace_id="trace-test")
+    monkeypatch.setattr(recorder, "_host", "http://langfuse")
+    monkeypatch.setattr(recorder, "_public_key", "pk-test")
+    monkeypatch.setattr(recorder, "_secret_key", "sk-test")
+    calls: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        recorder,
+        "_send",
+        lambda event_type, body: calls.append((event_type, body)),
+    )
+
+    recorder.trace(metadata={"jobType": "topic.scout"})
+    recorder.generation(
+        model="model",
+        request=ChatRequest(messages=[]),
+        response=_resp([TextBlock(text="output")], "end_turn"),
+        observation_name="scout",
+        prompt_version="topic-scout@v1",
+    )
+    recorder.score(name="topic_total_score", value=80.0)
+
+    assert [event_type for event_type, _ in calls] == [
+        "trace-create",
+        "generation-create",
+        "score-create",
+    ]
+    generation = calls[1][1]
+    assert generation["usage"] == {
+        "input": 1,
+        "output": 1,
+        "total": 2,
+        "unit": "TOKENS",
+    }
+    assert generation["usageDetails"] == {"input": 1, "output": 1, "total": 2}

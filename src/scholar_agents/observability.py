@@ -38,24 +38,43 @@ class TraceRecorder:
     ) -> None:
         if not self.enabled:
             return
+        now = datetime.now(UTC).isoformat()
+        input_payload = _request_payload(request)
         body: dict[str, Any] = {
             "id": str(uuid4()),
             "traceId": self.trace_id,
             "name": observation_name,
-            "startTime": datetime.now(UTC).isoformat(),
-            "endTime": datetime.now(UTC).isoformat(),
+            "startTime": now,
+            "endTime": now,
             "model": response.model or model,
-            "input": _request_payload(request),
+            "input": input_payload,
             "output": response.raw or response.text,
             "usage": {
                 "input": response.usage.input_tokens,
                 "output": response.usage.output_tokens,
+                "total": response.usage.input_tokens + response.usage.output_tokens,
+                "unit": "TOKENS",
+            },
+            "usageDetails": {
+                "input": response.usage.input_tokens,
+                "output": response.usage.output_tokens,
+                "total": response.usage.input_tokens + response.usage.output_tokens,
             },
         }
         if prompt_version:
             body["promptName"] = prompt_version.split("@", 1)[0]
             body["promptVersion"] = prompt_version.split("@", 1)[-1]
         self._send("generation-create", body)
+
+    def trace(self, *, input_payload: Any = None, metadata: dict[str, Any] | None = None) -> None:
+        if not self.enabled:
+            return
+        body: dict[str, Any] = {"id": self.trace_id, "timestamp": datetime.now(UTC).isoformat()}
+        if input_payload is not None:
+            body["input"] = input_payload
+        if metadata:
+            body["metadata"] = metadata
+        self._send("trace-create", body)
 
     def score(self, *, name: str, value: float, comment: str | None = None) -> None:
         if not self.enabled:

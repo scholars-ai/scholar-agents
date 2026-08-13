@@ -84,6 +84,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     router = ModelRouter.from_yaml(_routing_config_path())
     provider, model = router.resolve("topic_scout")
     trace = TraceRecorder(name="topic-scout")
+    trace.trace(metadata={"jobType": "topic.scout"})
     provider = ObservedProvider(
         provider,
         trace,
@@ -111,6 +112,7 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> Non
     router = ModelRouter.from_yaml(_routing_config_path())
     provider, model = router.resolve("topic_judge")
     trace = TraceRecorder(name="topic-judge")
+    trace.trace(metadata={"jobType": "topic.evaluate", "topicId": str(topic_id)})
     observed_provider = ObservedProvider(
         provider,
         trace,
