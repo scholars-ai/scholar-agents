@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from scholar_agents.providers.anthropic_provider import AnthropicProvider, _to_anthropic_messages
 from scholar_agents.providers.base import (
@@ -19,6 +22,7 @@ from scholar_agents.providers.base import (
     UserMessage,
 )
 from scholar_agents.providers.openai_provider import OpenAICompatProvider, _to_openai_messages
+from scholar_agents.providers.router import ModelRouter
 
 TOOLS = [ToolSpec(name="search", description="search the web", input_schema={"type": "object"})]
 REQ = ChatRequest(messages=[UserMessage(content="hi")], system="be brief", tools=TOOLS)
@@ -191,3 +195,27 @@ class TestCrossProviderConsistency:
         assert ra.stop_reason == ro.stop_reason == "tool_use"
         assert ra.tool_calls[0].name == ro.tool_calls[0].name
         assert ra.tool_calls[0].arguments == ro.tool_calls[0].arguments
+
+
+def test_router_allows_provider_model_environment_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "routing.yaml"
+    config.write_text(
+        """
+providers:
+  anthropic:
+    protocol: anthropic
+    api_key_env: TEST_ANTHROPIC_KEY
+    model_env: TEST_ANTHROPIC_MODEL
+tasks:
+  topic_scout: anthropic/example-model
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TEST_ANTHROPIC_KEY", "test-key")
+    monkeypatch.setenv("TEST_ANTHROPIC_MODEL", "claude-opus-4-8")
+
+    _, model = ModelRouter.from_yaml(config).resolve("topic_scout")
+
+    assert model == "claude-opus-4-8"

@@ -4,6 +4,7 @@ providers:
   anthropic:
     protocol: anthropic
     api_key_env: ANTHROPIC_API_KEY
+    model_env: ANTHROPIC_MODEL
   deepseek:
     protocol: openai
     base_url: https://api.deepseek.com

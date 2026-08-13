@@ -92,8 +92,9 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     )
     repository = AgentRepository(conn)
     max_topics = payload.get("maxTopics")
+    max_items = payload.get("maxItems")
     run_scout(
-        repository.list_new_raw_items(),
+        repository.list_new_raw_items(limit=int(max_items) if max_items is not None else 100),
         provider,
         model,
         repository,

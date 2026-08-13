@@ -20,6 +20,7 @@ class ProviderConfig(BaseModel):
     protocol: str  # anthropic | openai
     base_url: str | None = None
     api_key_env: str  # 环境变量名，如 ANTHROPIC_API_KEY / DEEPSEEK_API_KEY
+    model_env: str | None = None  # 可选：用环境变量覆盖路由中的默认模型名
 
 
 class RoutingConfig(BaseModel):
@@ -46,7 +47,11 @@ class ModelRouter:
         provider_name, _, model = route.partition("/")
         if not model:
             raise ValueError(f"bad route for task {task!r}: {route!r} (want 'provider/model')")
-        return self._provider(provider_name), model
+        cfg = self._config.providers.get(provider_name)
+        if cfg is None:
+            raise KeyError(f"unknown provider {provider_name!r} in model_routing.yaml")
+        selected_model = os.environ.get(cfg.model_env, "") if cfg.model_env else ""
+        return self._provider(provider_name), selected_model or model
 
     def complete(self, task: str, req: ChatRequest) -> ChatResponse:
         provider, model = self.resolve(task)
