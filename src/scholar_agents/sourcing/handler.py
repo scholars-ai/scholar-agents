@@ -11,9 +11,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 import structlog
 from psycopg import Connection
@@ -61,6 +62,7 @@ class SourcingStats:
     skipped: int = 0
     too_old: int = 0
     failed: int = 0
+    item_ids: list[UUID] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -221,8 +223,13 @@ def _store_item(
 ) -> SourcingStats:
     with conn.cursor() as cur:
         cur.execute("select 1 from raw_items where content_hash = %s", (item.content_hash,))
-        if cur.fetchone():
+        existing = cur.fetchone()
+        if existing:
             stats.dup_exact += 1
+            cur.execute("select id from raw_items where content_hash = %s", (item.content_hash,))
+            row = cur.fetchone()
+            if row is not None:
+                stats.item_ids.append(UUID(str(row["id"])))
             return stats
 
     vec = embed(f"{item.title}\n\n{item.content}")
@@ -245,6 +252,7 @@ def _store_item(
                  content_hash, embedding, status)
             values (%s, %s, %s, %s, %s, %s, %s, %s::vector, 'new')
             on conflict (content_hash) do nothing
+            returning id
             """,
             (
                 source["id"],
@@ -257,6 +265,9 @@ def _store_item(
                 to_pgvector(vec),
             ),
         )
-        stats.inserted += cur.rowcount
+        row = cur.fetchone()
+        if row is not None:
+            stats.inserted += 1
+            stats.item_ids.append(UUID(str(row["id"])))
     conn.commit()
     return stats

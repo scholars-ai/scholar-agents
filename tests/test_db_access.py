@@ -40,6 +40,42 @@ def test_raw_item_record_keeps_source_context_for_scout() -> None:
     assert item.embedding == [1.0, 0.0]
 
 
+def test_scout_can_limit_raw_items_to_targeted_ids() -> None:
+    from scholar_agents.db_access import AgentRepository
+
+    class Cursor:
+        def __init__(self) -> None:
+            self.query = ""
+            self.params: tuple[object, ...] = ()
+
+        def __enter__(self) -> Cursor:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def execute(self, query: str, params: tuple[object, ...] = ()) -> None:
+            self.query = query
+            self.params = params
+
+        def fetchall(self) -> list[dict[str, object]]:
+            return []
+
+    class Connection:
+        def __init__(self) -> None:
+            self.cursor_instance = Cursor()
+
+        def cursor(self) -> Cursor:
+            return self.cursor_instance
+
+    connection = Connection()
+    repository = AgentRepository(connection)  # type: ignore[arg-type]
+    repository.list_new_raw_items(raw_item_ids=[uuid4()])
+
+    assert "r.id = any(%s)" in connection.cursor_instance.query
+    assert len(connection.cursor_instance.params) == 2
+
+
 def test_topic_record_builds_judge_context_from_joined_row() -> None:
     topic_id = uuid4()
     raw_item_id = uuid4()

@@ -157,19 +157,27 @@ class AgentRepository:
     def __init__(self, conn: Connection[dict[str, Any]]) -> None:
         self._conn = conn
 
-    def list_new_raw_items(self, limit: int = 100) -> list[RawItemRecord]:
+    def list_new_raw_items(
+        self, limit: int = 100, raw_item_ids: list[UUID] | None = None
+    ) -> list[RawItemRecord]:
+        id_filter = ""
+        params: list[Any] = []
+        if raw_item_ids:
+            id_filter = "and r.id = any(%s)"
+            params.append(raw_item_ids)
+        params.append(limit)
         with self._conn.cursor() as cur:
             cur.execute(
-                """
+                f"""
                 select r.id, r.source_id, r.title, r.url, r.author, r.content,
                        r.published_at, r.embedding, s.name as source_name, s.weight as source_weight
                 from raw_items r
                 join sources s on s.id = r.source_id
-                where r.status = 'new'
+                where r.status = 'new' {id_filter}
                 order by r.created_at, r.id
                 limit %s
                 """,
-                (limit,),
+                tuple(params),
             )
             rows = cur.fetchall()
         return [RawItemRecord.from_row(row) for row in rows]

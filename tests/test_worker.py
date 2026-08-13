@@ -15,6 +15,23 @@ def test_m1_handlers_are_registered() -> None:
     assert {"source_fetch", "topic_scout", "topic_evaluate"}.issubset(HANDLERS)
 
 
+def test_manual_source_fetch_builds_targeted_scout_payload() -> None:
+    from scholar_agents.worker.consumer import _manual_scout_payload
+
+    payload = _manual_scout_payload(
+        {"sourceId": "source-1", "url": "https://example.com/article"},
+        ["item-1"],
+    )
+
+    assert payload == {"rawItemIds": ["item-1"]}
+
+
+def test_non_manual_source_fetch_does_not_build_targeted_scout_payload() -> None:
+    from scholar_agents.worker.consumer import _manual_scout_payload
+
+    assert _manual_scout_payload({"sourceId": "source-1"}, ["item-1"]) is None
+
+
 @pytest.mark.parametrize(
     ("message", "expected"),
     [

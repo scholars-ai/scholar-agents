@@ -50,6 +50,7 @@ class AnthropicProvider:
             api_key=api_key,
             base_url=base_url,
             timeout=_request_timeout(),
+            max_retries=0,
         )
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:

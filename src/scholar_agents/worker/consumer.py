@@ -15,6 +15,7 @@ import types
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import structlog
 from psycopg import Connection
@@ -77,7 +78,24 @@ def handler(queue: str) -> Callable[[Handler], Handler]:
 
 @handler("source_fetch")
 def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> None:
-    handle_source_fetch(conn, payload)
+    stats = handle_source_fetch(conn, payload)
+    scout_payload = _manual_scout_payload(payload, [str(item_id) for item_id in stats.item_ids])
+    if scout_payload is None:
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "select pgmq.send(%s, %s::jsonb)",
+            ("topic_scout", json.dumps(scout_payload)),
+        )
+    conn.commit()
+
+
+def _manual_scout_payload(
+    payload: dict[str, Any], item_ids: list[str]
+) -> dict[str, Any] | None:
+    if not payload.get("url") or not item_ids:
+        return None
+    return {"rawItemIds": item_ids}
 
 
 @handler("topic_scout")
@@ -95,8 +113,12 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     repository = AgentRepository(conn)
     max_topics = payload.get("maxTopics")
     max_items = payload.get("maxItems")
+    raw_item_ids = [UUID(str(value)) for value in payload.get("rawItemIds", [])]
     run_scout(
-        repository.list_new_raw_items(limit=int(max_items) if max_items is not None else 100),
+        repository.list_new_raw_items(
+            limit=int(max_items) if max_items is not None else 100,
+            raw_item_ids=raw_item_ids or None,
+        ),
         provider,
         model,
         repository,
