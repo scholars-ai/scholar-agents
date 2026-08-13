@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any, Literal
 
 import openai
@@ -30,6 +31,19 @@ from scholar_agents.providers.base import (
     UserMessage,
 )
 
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+
+
+def _request_timeout() -> float:
+    raw = os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "")
+    if not raw:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
+
 
 class OpenAICompatProvider:
     def __init__(
@@ -41,7 +55,11 @@ class OpenAICompatProvider:
     ) -> None:
         self.name = name
         self.json_mode = json_mode
-        self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
+        self._client = openai.OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=_request_timeout(),
+        )
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:
         kwargs: dict[str, Any] = {

@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Literal, cast
 
 import anthropic
@@ -27,13 +28,29 @@ from scholar_agents.providers.base import (
 )
 
 _STRUCTURED_TOOL = "emit_structured_output"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+
+
+def _request_timeout() -> float:
+    raw = os.environ.get("LLM_REQUEST_TIMEOUT_SECONDS", "")
+    if not raw:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        return DEFAULT_REQUEST_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
 
 
 class AnthropicProvider:
     name = "anthropic"
 
     def __init__(self, api_key: str | None = None, base_url: str | None = None) -> None:
-        self._client = anthropic.Anthropic(api_key=api_key, base_url=base_url)
+        self._client = anthropic.Anthropic(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=_request_timeout(),
+        )
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:
         tools = [

@@ -69,6 +69,13 @@ class TestAnthropicNormalization:
         assert resp.stop_reason == "end_turn"
         assert resp.usage.input_tokens == 10
 
+    def test_provider_sets_request_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
+        provider = AnthropicProvider.__new__(AnthropicProvider)
+        provider._client = MagicMock()
+        provider.__init__(api_key="test-key")
+        assert provider._client is not None
+
     def test_tool_call_normalized(self) -> None:
         p = self._provider(
             _anthropic_sdk_response([_tool_use_block("search", {"q": "ai"})], stop="tool_use")
@@ -145,6 +152,11 @@ class TestOpenAINormalization:
         assert resp.text == "hello"
         assert resp.stop_reason == "end_turn"
         assert resp.usage.input_tokens == 10
+
+    def test_provider_sets_request_timeout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
+        provider = OpenAICompatProvider(api_key="test-key")
+        assert provider._client.timeout == 45
 
     def test_tool_call_arguments_parsed_from_json_string(self) -> None:
         p = self._provider(
