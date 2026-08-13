@@ -21,6 +21,38 @@ from psycopg.rows import dict_row
 
 log = structlog.get_logger()
 
+# 同一个 job 最多执行三次；供应商配额/认证类错误不应进入 visibility timeout 重试。
+MAX_JOB_ATTEMPTS = 3
+_PERMANENT_ERROR_MARKERS = (
+    "quota",
+    "rate limit",
+    "insufficient balance",
+    "invalid api key",
+    "authentication",
+    "unauthorized",
+    "model not found",
+)
+
+
+class PermanentJobError(RuntimeError):
+    """当前 job 无法通过重试恢复，应直接进入失败/死信处理。"""
+
+
+def is_permanent_error(exc: BaseException) -> bool:
+    """按供应商错误文本识别不可重试的额度、认证和模型配置错误。"""
+    message = str(exc).lower()
+    return any(marker in message for marker in _PERMANENT_ERROR_MARKERS)
+
+
+def should_retry(exc: BaseException, read_count: int) -> bool:
+    """临时错误最多重试到 MAX_JOB_ATTEMPTS；永久错误永不重试。"""
+    return (
+        read_count < MAX_JOB_ATTEMPTS
+        and not isinstance(exc, PermanentJobError)
+        and not is_permanent_error(exc)
+    )
+
+
 # 队列名以 scholar-shared/schemas/queues.json 为准
 Handler = Callable[[dict[str, Any]], None]
 HANDLERS: dict[str, Handler] = {}
@@ -55,23 +87,34 @@ class Worker:
         for queue, fn in HANDLERS.items():
             with self._conn.cursor(row_factory=dict_row) as cur:
                 cur.execute(
-                    "select msg_id, message from pgmq.read(%s, %s, 1)", (queue, self._vt)
+                    "select msg_id, read_ct, message from pgmq.read(%s, %s, 1)",
+                    (queue, self._vt),
                 )
                 row = cur.fetchone()
             if row is None:
                 continue
             got = True
-            msg_id, payload = row["msg_id"], row["message"]
+            msg_id, read_count, payload = row["msg_id"], row["read_ct"], row["message"]
             if isinstance(payload, str):  # psycopg 的 jsonb 通常已解码，防御字符串形态
                 payload = json.loads(payload)
             log.info("job_start", queue=queue, msg_id=msg_id)
             try:
                 fn(payload)
-            except Exception:
-                # 不 delete：visibility timeout 到期后 pgmq 自动重投；
-                # 重试上限与死信队列在 M1 落地
-                log.exception("job_failed", queue=queue, msg_id=msg_id)
+            except Exception as exc:  # noqa: BLE001 — worker 边界必须兜住 job 异常
+                retry = should_retry(exc, read_count)
+                log.exception(
+                    "job_failed",
+                    queue=queue,
+                    msg_id=msg_id,
+                    read_count=read_count,
+                    retry=retry,
+                )
                 self._conn.rollback()
+                if not retry:
+                    with self._conn.cursor() as cur:
+                        cur.execute("select pgmq.delete(%s, %s)", (queue, msg_id))
+                    self._conn.commit()
+                    log.error("job_discarded", queue=queue, msg_id=msg_id)
             else:
                 with self._conn.cursor() as cur:
                     cur.execute("select pgmq.delete(%s, %s)", (queue, msg_id))
