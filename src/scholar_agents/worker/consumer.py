@@ -124,6 +124,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
         repository,
         max_topics=int(max_topics) if max_topics is not None else None,
         langfuse_trace_id=trace.trace_id,
+        targeted=bool(raw_item_ids),
     )
 
 

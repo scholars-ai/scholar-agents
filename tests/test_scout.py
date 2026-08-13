@@ -114,6 +114,15 @@ def test_build_scout_prompt_requires_one_angle_for_a_coherent_event() -> None:
     assert "不要因为角度不够差异化而丢弃" in system
 
 
+def test_build_scout_prompt_requires_candidate_for_targeted_single_item() -> None:
+    items = [_item("独立研究论文", [1.0, 0.0])]
+
+    system, _ = build_scout_prompt(items, targeted=True)
+
+    assert "定向手动投喂" in system
+    assert "必须输出 1 个可写选题" in system
+
+
 def test_scout_output_schema_limits_raw_item_ids_to_input_cluster() -> None:
     items = [_item("模型发布 A", [1.0, 0.0]), _item("模型发布 B", [0.99, 0.1])]
 
@@ -241,6 +250,39 @@ def test_run_scout_writes_draft_and_records_usage() -> None:
     assert len(repository.created_topics) == 1
     assert repository.clustered == [item.id]
     assert len(repository.runs) == 1
+
+
+def test_run_scout_passes_targeted_mode_to_single_item_prompt() -> None:
+    item = _item("独立研究论文", [1.0, 0.0])
+    provider = FakeProvider(
+        [
+            json.dumps(
+                {
+                    "topics": [
+                        {
+                            "title": "独立研究论文的实践启示",
+                            "angle": "从研究结果看应用影响",
+                            "summary": "摘要",
+                            "rawItemIds": [str(item.id)],
+                            "targetPlatforms": ["zhihu"],
+                        }
+                    ]
+                }
+            )
+        ]
+    )
+    repository = FakeRepository()
+
+    result = run_scout(
+        [item],
+        provider,
+        "fake-model",
+        repository,
+        targeted=True,
+        embed_fn=lambda text: [1.0, 0.0],
+    )
+
+    assert result.created_topics == 1
 
 
 def test_run_scout_does_not_write_duplicate_topic() -> None:

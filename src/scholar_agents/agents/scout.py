@@ -111,7 +111,9 @@ def format_cluster_context(items: list[RawItemRecord]) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def build_scout_prompt(items: list[RawItemRecord]) -> tuple[str, str]:
+def build_scout_prompt(
+    items: list[RawItemRecord], *, targeted: bool = False
+) -> tuple[str, str]:
     """构造 TopicScout 的系统提示和素材上下文。"""
     system = """你是 TopicScout，负责把资讯素材聚合成可创作的选题。
 
@@ -122,6 +124,11 @@ def build_scout_prompt(items: list[RawItemRecord]) -> tuple[str, str]:
 不要因为角度不够差异化而丢弃同一事件。
 每个角度必须引用输入素材中的 rawItemIds，只能建议 xiaohongshu、zhihu、wechat 平台。
 输出必须符合 TopicScoutOutput schema，字段名使用 rawItemIds 和 targetPlatforms。"""
+    if targeted:
+        system += """
+
+当前是定向手动投喂模式。即使输入只有一篇素材，也必须输出 1 个可写选题；
+不要因为缺少其他报道而输出空 topics。选题只能基于这篇素材，不得虚构未提供的事实。"""
     allowed_ids = "、".join(str(item.id) for item in items)
     user = (
         f"请分析以下素材簇。rawItemIds 只能从这个列表中选择：{allowed_ids}\n\n"
@@ -169,6 +176,7 @@ def run_scout(
     max_topics: int | None = None,
     embed_fn: EmbedFn | None = None,
     langfuse_trace_id: str | None = None,
+    targeted: bool = False,
 ) -> ScoutResult:
     """运行一轮 TopicScout；调用方负责事务提交。"""
     if not items:
@@ -184,7 +192,7 @@ def run_scout(
             if max_topics is not None and created_topics >= max_topics:
                 break
             clusters_processed += 1
-            system, user = build_scout_prompt(cluster)
+            system, user = build_scout_prompt(cluster, targeted=targeted)
             data, usage = complete_structured(
                 provider,
                 model,
