@@ -12,6 +12,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Checkout shared contracts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: scholars-ai/scholar-shared
+          path: scholar-shared
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Link shared contracts beside workspace
+        run: ln -s "$GITHUB_WORKSPACE/scholar-shared" "$GITHUB_WORKSPACE/../scholar-shared"
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
       - name: Sync dependencies
         run: uv sync
