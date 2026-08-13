@@ -36,5 +36,6 @@ uv run ruff check . && uv run mypy   # strict
 - **协议差异只存在于 adapter 内**：runtime 之上看到的永远是归一化的 ChatRequest/ChatResponse。
 - **契约错误必须炸出来**：未知 task 路由、未知工具名、结构化输出重试耗尽，一律抛异常。
 - **重试必须有边界**：结构化输出最多 3 次；quota、余额、认证和模型不存在等永久错误不重试；临时 job 错误最多执行 3 次。
+- **定时 Scout 批次有边界**：普通调度默认最多处理 5 条新素材，避免单个 LLM job 超过 pgmq visibility timeout；手动定向投喂按指定 `rawItemIds` 处理，不受该默认批次限制。
 - **LLM 请求必须有超时**：默认单次请求 120 秒，可由 `LLM_REQUEST_TIMEOUT_SECONDS` 调整，避免超过 pgmq visibility timeout 后重复领取。
 - 密钥全部走环境变量（`.env.example`），绝不入库。
