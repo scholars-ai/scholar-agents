@@ -155,6 +155,13 @@ class TestOpenAINormalization:
         [call] = resp.tool_calls
         assert (call.name, call.arguments) == ("search", {"q": "ai"})
 
+    def test_json_object_mode_uses_generic_response_format(self) -> None:
+        p = self._provider(_openai_sdk_response('{"ok": true}'))
+        p.json_mode = "object"
+        p.complete("qwen", REQ.model_copy(update={"json_schema": {"type": "object"}}))
+        kwargs = p._client.chat.completions.create.call_args.kwargs
+        assert kwargs["response_format"] == {"type": "json_object"}
+
     def test_system_goes_first_and_tool_result_is_tool_role(self) -> None:
         msgs = _to_openai_messages(
             [

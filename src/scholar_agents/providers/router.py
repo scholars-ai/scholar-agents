@@ -21,6 +21,7 @@ class ProviderConfig(BaseModel):
     base_url: str | None = None
     api_key_env: str  # 环境变量名，如 ANTHROPIC_API_KEY / DEEPSEEK_API_KEY
     model_env: str | None = None  # 可选：用环境变量覆盖路由中的默认模型名
+    json_mode: str = "schema"  # schema | object（部分兼容端点只支持通用 JSON）
 
 
 class RoutingConfig(BaseModel):
@@ -71,7 +72,12 @@ class ModelRouter:
         if cfg.protocol == "anthropic":
             provider = AnthropicProvider(api_key=api_key, base_url=cfg.base_url)
         elif cfg.protocol == "openai":
-            provider = OpenAICompatProvider(name=name, api_key=api_key, base_url=cfg.base_url)
+            provider = OpenAICompatProvider(
+                name=name,
+                api_key=api_key,
+                base_url=cfg.base_url,
+                json_mode=cfg.json_mode,
+            )
         else:
             raise ValueError(f"unknown protocol {cfg.protocol!r} for provider {name!r}")
         self._instances[name] = provider

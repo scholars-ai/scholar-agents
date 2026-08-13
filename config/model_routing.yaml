@@ -14,6 +14,7 @@ providers:
     base_url: https://api.siliconflow.cn/v1
     api_key_env: SF_API_KEY
     model_env: SILICONFLOW_MODEL
+    json_mode: object
   # 需要时解注释即可接入其他 OpenAI 兼容端点：
   # kimi:
   #   protocol: openai

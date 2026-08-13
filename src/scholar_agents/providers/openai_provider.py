@@ -37,8 +37,10 @@ class OpenAICompatProvider:
         name: str = "openai",
         api_key: str | None = None,
         base_url: str | None = None,
+        json_mode: str = "schema",
     ) -> None:
         self.name = name
+        self.json_mode = json_mode
         self._client = openai.OpenAI(api_key=api_key, base_url=base_url)
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:
@@ -60,10 +62,13 @@ class OpenAICompatProvider:
                 for t in req.tools
             ]
         if req.json_schema is not None:
-            kwargs["response_format"] = {
-                "type": "json_schema",
-                "json_schema": {"name": "structured_output", "schema": req.json_schema},
-            }
+            if self.json_mode == "object":
+                kwargs["response_format"] = {"type": "json_object"}
+            else:
+                kwargs["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": {"name": "structured_output", "schema": req.json_schema},
+                }
         if req.temperature is not None:
             kwargs["temperature"] = req.temperature
 
