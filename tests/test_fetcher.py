@@ -193,3 +193,18 @@ class TestFreshnessWindow:
         """handler 依赖它做时效过滤，必须是稳定的公开 API。"""
         from scholar_agents.sourcing.fetcher import published_at
         assert published_at({}) is None
+
+
+def test_manual_url_uses_page_content_without_fetching_feed() -> None:
+    from scholar_agents.sourcing.fetcher import build_manual_item
+
+    with patch(
+        "scholar_agents.sourcing.fetcher.fetch_page_text", return_value="页面正文内容。"
+    ) as page:
+        item = build_manual_item("https://example.com/manual")
+
+    page.assert_called_once_with("https://example.com/manual")
+    assert item is not None
+    assert item.url == "https://example.com/manual"
+    assert item.content == "页面正文内容。"
+    assert item.title == "https://example.com/manual"

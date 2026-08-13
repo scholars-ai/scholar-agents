@@ -25,6 +25,7 @@ from scholar_agents.sourcing.fetcher import (
     FullText,
     Role,
     build_item,
+    build_manual_item,
     fetch_feed,
 )
 from scholar_agents.sourcing.fetcher import (
@@ -140,7 +141,7 @@ def _semantic_duplicate(
 def handle_source_fetch(
     conn: Connection[dict[str, Any]], payload: dict[str, Any]
 ) -> SourcingStats:
-    """采集一个信源。payload: {"sourceId": uuid}"""
+    """采集一个信源，或处理手动投喂 payload 的单个 URL。"""
     source_id = payload["sourceId"]
     with conn.cursor() as cur:
         cur.execute(
@@ -153,12 +154,21 @@ def handle_source_fetch(
     if not source["enabled"]:
         log.info("source_disabled_skip", source=source["name"])
         return SourcingStats()
-    if not source["url"]:
+    manual_url = payload.get("url")
+    if not source["url"] and not manual_url:
         raise ValueError(f"source {source['name']} has no url")
 
     cfg = _source_config(source)
     role, full_text = cfg.role, cfg.full_text
     stats = SourcingStats()
+    if manual_url:
+        item = build_manual_item(str(manual_url))
+        stats.fetched = 1
+        if item is None:
+            stats.failed = 1
+            return stats
+        return _store_item(conn, source, item, stats)
+
     all_entries = fetch_feed(source["url"])  # 整个 feed 拉不动 → 抛 FetchError，由 worker 重试
     entries = all_entries[: cfg.max_items]
     if len(all_entries) > cfg.max_items:
@@ -186,47 +196,7 @@ def handle_source_fetch(
                 continue
 
             # 精确去重：content_hash 有 unique 约束，先查省掉一次异常往返
-            with conn.cursor() as cur:
-                cur.execute("select 1 from raw_items where content_hash = %s", (item.content_hash,))
-                if cur.fetchone():
-                    stats.dup_exact += 1
-                    continue
-
-            vec = embed(f"{item.title}\n\n{item.content}")
-
-            dup = _semantic_duplicate(conn, vec)
-            if dup is not None:
-                stats.dup_semantic += 1
-                log.info(
-                    "semantic_duplicate",
-                    title=item.title[:50],
-                    existing=dup[0],
-                    similarity=round(dup[1], 4),
-                )
-                continue
-
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    insert into raw_items
-                        (source_id, title, url, author, content, published_at,
-                         content_hash, embedding, status)
-                    values (%s, %s, %s, %s, %s, %s, %s, %s::vector, 'new')
-                    on conflict (content_hash) do nothing
-                    """,
-                    (
-                        source_id,
-                        item.title,
-                        item.url,
-                        item.author,
-                        item.content,
-                        item.published_at,
-                        item.content_hash,
-                        to_pgvector(vec),
-                    ),
-                )
-                stats.inserted += cur.rowcount
-            conn.commit()
+            _store_item(conn, source, item, stats)
 
         except (EmbeddingError, FetchError) as exc:
             # 单条失败不拖垮整个源（SPEC-008 §6：单源失败隔离的条目级版本）
@@ -243,4 +213,50 @@ def handle_source_fetch(
             )
 
     log.info("source_fetch_done", source=source["name"], role=role, **stats.as_dict())
+    return stats
+
+
+def _store_item(
+    conn: Connection[dict[str, Any]], source: dict[str, Any], item: Any, stats: SourcingStats
+) -> SourcingStats:
+    with conn.cursor() as cur:
+        cur.execute("select 1 from raw_items where content_hash = %s", (item.content_hash,))
+        if cur.fetchone():
+            stats.dup_exact += 1
+            return stats
+
+    vec = embed(f"{item.title}\n\n{item.content}")
+    dup = _semantic_duplicate(conn, vec)
+    if dup is not None:
+        stats.dup_semantic += 1
+        log.info(
+            "semantic_duplicate",
+            title=item.title[:50],
+            existing=dup[0],
+            similarity=round(dup[1], 4),
+        )
+        return stats
+
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into raw_items
+                (source_id, title, url, author, content, published_at,
+                 content_hash, embedding, status)
+            values (%s, %s, %s, %s, %s, %s, %s, %s::vector, 'new')
+            on conflict (content_hash) do nothing
+            """,
+            (
+                source["id"],
+                item.title,
+                item.url,
+                item.author,
+                item.content,
+                item.published_at,
+                item.content_hash,
+                to_pgvector(vec),
+            ),
+        )
+        stats.inserted += cur.rowcount
+    conn.commit()
     return stats

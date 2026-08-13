@@ -157,3 +157,18 @@ def build_item(entry: dict[str, Any], *, role: Role, full_text: FullText) -> Fet
         published_at=published_at(entry),
         content_hash=content_hash,
     )
+
+
+def build_manual_item(url: str) -> FetchedItem | None:
+    """抓取一条手动投喂 URL，避免把它当作整个 feed 处理。"""
+    content = fetch_page_text(url)[:MAX_CONTENT_CHARS]
+    if not content:
+        return None
+    return FetchedItem(
+        title=url,
+        url=url,
+        author=None,
+        content=content,
+        published_at=datetime.now(UTC),
+        content_hash=f"manual:{hashlib.sha256(url.encode()).hexdigest()}",
+    )
