@@ -118,7 +118,8 @@ def build_scout_prompt(items: list[RawItemRecord]) -> tuple[str, str]:
 先判断素材是否属于同一事件：相似主题不等于同一事件，不要为了凑簇而强行合并。
 跨语言、不同来源对同一产品发布或同一新闻事件的报道，仍应视为同一事件；语言差异本身不是拆分理由。
 如果素材并非同一事件，输出空 topics，并在 discardReason 说明原因。
-如果属于同一事件，最多输出 1–3 个不同创作角度。
+如果属于同一事件，至少输出一个可写角度，最多输出 1–3 个不同创作角度；
+不要因为角度不够差异化而丢弃同一事件。
 每个角度必须引用输入素材中的 rawItemIds，只能建议 xiaohongshu、zhihu、wechat 平台。
 输出必须符合 TopicScoutOutput schema，字段名使用 rawItemIds 和 targetPlatforms。"""
     allowed_ids = "、".join(str(item.id) for item in items)

@@ -105,6 +105,15 @@ def test_build_scout_prompt_treats_cross_language_reports_as_one_event() -> None
     assert str(items[1].id) in user
 
 
+def test_build_scout_prompt_requires_one_angle_for_a_coherent_event() -> None:
+    items = [_item("同一事件 A", [1.0, 0.0]), _item("同一事件 B", [0.99, 0.1])]
+
+    system, _ = build_scout_prompt(items)
+
+    assert "至少输出一个可写角度" in system
+    assert "不要因为角度不够差异化而丢弃" in system
+
+
 def test_scout_output_schema_limits_raw_item_ids_to_input_cluster() -> None:
     items = [_item("模型发布 A", [1.0, 0.0]), _item("模型发布 B", [0.99, 0.1])]
 
