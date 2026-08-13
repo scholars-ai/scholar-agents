@@ -92,6 +92,19 @@ def test_build_scout_prompt_requires_event_judgment_and_limits_drafts() -> None:
     assert "rawItemIds" in system
 
 
+def test_build_scout_prompt_treats_cross_language_reports_as_one_event() -> None:
+    items = [
+        _item("NVIDIA VoiceChat English", [1.0, 0.0]),
+        _item("NVIDIA VoiceChat 中文", [0.99, 0.1]),
+    ]
+
+    system, user = build_scout_prompt(items)
+
+    assert "跨语言" in system
+    assert str(items[0].id) in user
+    assert str(items[1].id) in user
+
+
 def test_scout_output_schema_limits_raw_item_ids_to_input_cluster() -> None:
     items = [_item("模型发布 A", [1.0, 0.0]), _item("模型发布 B", [0.99, 0.1])]
 

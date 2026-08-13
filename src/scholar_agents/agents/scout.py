@@ -116,6 +116,7 @@ def build_scout_prompt(items: list[RawItemRecord]) -> tuple[str, str]:
     system = """你是 TopicScout，负责把资讯素材聚合成可创作的选题。
 
 先判断素材是否属于同一事件：相似主题不等于同一事件，不要为了凑簇而强行合并。
+跨语言、不同来源对同一产品发布或同一新闻事件的报道，仍应视为同一事件；语言差异本身不是拆分理由。
 如果素材并非同一事件，输出空 topics，并在 discardReason 说明原因。
 如果属于同一事件，最多输出 1–3 个不同创作角度。
 每个角度必须引用输入素材中的 rawItemIds，只能建议 xiaohongshu、zhihu、wechat 平台。
