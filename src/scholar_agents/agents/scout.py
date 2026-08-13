@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 from uuid import UUID
 
 from scholar_contracts.models import TopicDraft, TopicScoutOutput
@@ -137,7 +137,7 @@ def scout_output_schema(items: list[RawItemRecord]) -> dict[str, Any]:
         "format": "uuid",
         "enum": [str(item.id) for item in items],
     }
-    return schema
+    return cast(dict[str, Any], schema)
 
 
 def parse_scout_output(data: dict[str, Any], items: list[RawItemRecord]) -> list[TopicDraft]:
