@@ -196,7 +196,9 @@ def test_trace_recorder_uses_current_langfuse_ingestion_shape(
     recorder.generation(
         model="model",
         request=ChatRequest(messages=[]),
-        response=_resp([TextBlock(text="output")], "end_turn"),
+        response=_resp([TextBlock(text="output")], "end_turn").model_copy(
+            update={"raw": {"id": "provider-response-1"}}
+        ),
         observation_name="scout",
         prompt_version="topic-scout@v1",
     )
@@ -208,6 +210,7 @@ def test_trace_recorder_uses_current_langfuse_ingestion_shape(
         "score-create",
     ]
     generation = calls[1][1]
+    assert generation["output"] == "output"
     assert generation["usage"] == {
         "input": 1,
         "output": 1,
@@ -216,7 +219,10 @@ def test_trace_recorder_uses_current_langfuse_ingestion_shape(
     }
     assert generation["usageDetails"] == {"input": 1, "output": 1, "total": 2}
     assert generation["completionStartTime"] == generation["startTime"]
-    assert generation["metadata"] == {"promptVersion": "topic-scout@v1"}
+    assert generation["metadata"] == {
+        "promptVersion": "topic-scout@v1",
+        "providerResponse": {"id": "provider-response-1"},
+    }
 
 
 def test_trace_recorder_sends_ingestion_event_timestamp() -> None:

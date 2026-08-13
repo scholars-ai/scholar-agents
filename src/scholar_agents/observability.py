@@ -43,6 +43,8 @@ class TraceRecorder:
         metadata: dict[str, Any] = {}
         if prompt_version:
             metadata["promptVersion"] = prompt_version
+        if response.raw:
+            metadata["providerResponse"] = response.raw
         body: dict[str, Any] = {
             "id": str(uuid4()),
             "traceId": self.trace_id,
@@ -52,7 +54,7 @@ class TraceRecorder:
             "completionStartTime": now,
             "model": response.model or model,
             "input": input_payload,
-            "output": response.raw or response.text,
+            "output": response.text,
             "usage": {
                 "input": response.usage.input_tokens,
                 "output": response.usage.output_tokens,
