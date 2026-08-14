@@ -55,6 +55,8 @@ class PermanentJobError(RuntimeError):
 def is_permanent_error(exc: BaseException) -> bool:
     """按供应商错误文本识别不可重试的额度、认证和模型配置错误。"""
     message = str(exc).lower()
+    if "system is too busy" in message:
+        return False
     return any(marker in message for marker in _PERMANENT_ERROR_MARKERS)
 
 
@@ -152,7 +154,7 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> Non
         provider,
         trace,
         observation_name="topic-judge-structured",
-        prompt_version="topic-judge@v1",
+        prompt_version="topic-judge@v2",
     )
     run_judge(
         topic_id,
@@ -169,7 +171,7 @@ def _routing_config_path() -> Path:
 
 
 def _rubric_path() -> Path:
-    return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v1.yaml"
+    return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v2.yaml"
 
 
 def _connect_worker_database(dsn: str) -> Connection[Any]:

@@ -59,6 +59,7 @@ def test_targeted_scout_keeps_all_requested_items() -> None:
         ("env ANTHROPIC_API_KEY is required for provider 'anthropic'", True),
         ("source Manual Feed has no url", True),
         ("source source-1 not found", True),
+        ("429 rate limiting: system is too busy now", False),
         ("connection reset by peer", False),
     ],
 )

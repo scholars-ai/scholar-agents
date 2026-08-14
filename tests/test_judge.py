@@ -15,13 +15,13 @@ from scholar_agents.agents.judge import (
 )
 from scholar_agents.db_access import RawItemRecord, TopicRecord, WeightSetRecord
 
-RUBRIC_PATH = Path(__file__).parents[2] / "scholar-shared/rubrics/topic.v1.yaml"
+RUBRIC_PATH = Path(__file__).parents[2] / "scholar-shared/rubrics/topic.v2.yaml"
 
 
 def test_load_topic_rubric_reads_six_dimensions_without_veto() -> None:
     rubric = load_topic_rubric(RUBRIC_PATH.resolve())
 
-    assert rubric.version == RUBRIC_VERSION == "topic@v1"
+    assert rubric.version == RUBRIC_VERSION == "topic@v2"
     assert rubric.dimension_keys == (
         "timeliness",
         "audience_value",
@@ -103,6 +103,9 @@ def test_build_judge_prompt_includes_topic_and_material_context() -> None:
 
     assert "TopicJudge" in system
     assert "timeliness" in system
+    assert "中文社区" in system
+    assert "不要因为英文标题或名词陌生就自动高分" in system
+    assert "检查候选是否只是素材标题或同一事件的换词改写" in system
     assert "模型发布" in user
     assert "原始正文" in user
 

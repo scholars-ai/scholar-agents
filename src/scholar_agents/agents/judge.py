@@ -20,8 +20,8 @@ from scholar_agents.observability import TraceRecorder
 from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
-RUBRIC_VERSION = "topic@v1"
-PROMPT_VERSION = "topic-judge@v1"
+RUBRIC_VERSION = "topic@v2"
+PROMPT_VERSION = "topic-judge@v2"
 
 
 class TopicJudgeError(ValueError):
@@ -298,6 +298,15 @@ def build_judge_prompt(
 
 当前 rubric 版本是 {rubric.version}。不要输出总分，代码会根据生效权重重新计算。
 当前 rubric 没有一票否决维度；不要自行创造 veto 规则。
+评分时必须遵守以下要求：
+- 面向中文社区判断受众价值和平台适配，不要因为英文标题或名词陌生就自动高分；
+  需要说明普通中文读者为什么会关心，或需要怎样本地化解释。
+- 检查候选是否只是素材标题或同一事件的换词改写；如果没有独立切口，应降低差异化空间，
+  并在理由中明确指出。
+- 优先评价具体、可展开、有明确冲突或影响的切口；“繁荣与隐忧”“科技与自然的博弈”等宽泛表述
+  不能仅凭宏大主题高分。
+- 每个维度理由都要引用候选选题或关联素材中的具体事实；总体 rationale 必须解释最高分和最低分维度，
+  且与各维度理由一致。
 输出必须符合 TopicJudgeOutput schema。"""
     material_sections = []
     for index, item in enumerate(raw_items, start=1):
