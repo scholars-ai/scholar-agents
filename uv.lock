@@ -1444,7 +1444,7 @@ dev = [
 [[package]]
 name = "scholar-contracts"
 version = "0.1.0"
-source = { git = "https://github.com/scholars-ai/scholar-shared?subdirectory=gen%2Fpython#2cf465a1b58d17ce95aff67a6b7e387a5fd77913" }
+source = { git = "https://github.com/scholars-ai/scholar-shared?subdirectory=gen%2Fpython#bad5e847388b4f4d7007952e88f01beb4ed4979a" }
 dependencies = [
     { name = "pydantic" },
 ]
