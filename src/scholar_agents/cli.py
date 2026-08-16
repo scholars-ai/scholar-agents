@@ -56,8 +56,12 @@ def cmd_seed_sources(_: argparse.Namespace) -> int:
                     fetch_config = excluded.fetch_config, updated_at = now()
                 """,
                 (
-                    s["name"], s["type"], s["url"], s["category"],
-                    s["weight"], json.dumps(s.get("fetch_config") or {}),
+                    s["name"],
+                    s["type"],
+                    s["url"],
+                    s["category"],
+                    s["weight"],
+                    json.dumps(s.get("fetch_config") or {}),
                 ),
             )
         cur.execute("select count(*) as n, count(*) filter (where enabled) as on_ from sources")
@@ -76,9 +80,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
                     (args.name,),
                 )
             else:
-                cur.execute(
-                    "select id::text as id, name from sources where enabled order by name"
-                )
+                cur.execute("select id::text as id, name from sources where enabled order by name")
             targets = cur.fetchall()
 
         if not targets:

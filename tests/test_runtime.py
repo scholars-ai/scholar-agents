@@ -134,9 +134,7 @@ class TestCompleteStructured:
         assert "schema" in retry_prompt.content  # type: ignore[union-attr]
 
     def test_exhausted_raises(self) -> None:
-        provider = FakeProvider(
-            [_resp([TextBlock(text="not json")], "end_turn") for _ in range(3)]
-        )
+        provider = FakeProvider([_resp([TextBlock(text="not json")], "end_turn") for _ in range(3)])
         with pytest.raises(StructuredOutputError):
             complete_structured(provider, "m", "sys", "rate", SCHEMA, max_attempts=3)
 

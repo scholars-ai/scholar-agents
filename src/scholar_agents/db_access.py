@@ -21,8 +21,14 @@ from uuid import UUID
 from psycopg import Connection
 
 from scholar_agents.db import to_pgvector
+from scholar_agents.job_context import current_job
 
 AgentRunStatus = Literal["running", "succeeded", "failed"]
+
+
+def _current_correlation_id() -> UUID | None:
+    job = current_job()
+    return job.correlation_id if job else None
 
 
 def _uuid(value: object) -> UUID:
@@ -89,6 +95,7 @@ class TopicRecord:
     target_platforms: list[str]
     status: str
     latest_score: float | None
+    correlation_id: UUID | None = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> TopicRecord:
@@ -101,6 +108,9 @@ class TopicRecord:
             target_platforms=[str(value) for value in row.get("target_platforms") or []],
             status=str(row["status"]),
             latest_score=_optional_float(row.get("latest_score")),
+            correlation_id=(
+                _uuid(row["correlation_id"]) if row.get("correlation_id") is not None else None
+            ),
         )
 
 
@@ -135,6 +145,7 @@ class TopicEvaluationInsert:
     agent_run_id: UUID | None
     weight_version: int | None
     vetoed_dimension: str | None
+    dimension_reasons: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,6 +160,7 @@ class AgentRunInsert:
     cost_usd: float | None
     langfuse_trace_id: str | None
     status: AgentRunStatus
+    correlation_id: UUID | None = None
 
 
 class AgentRepository:
@@ -187,7 +199,7 @@ class AgentRepository:
             cur.execute(
                 """
                 select id, title, angle, summary, raw_item_ids, target_platforms,
-                       status, latest_score
+                       status, latest_score, correlation_id
                 from topics
                 where id = %s
                 """,
@@ -267,8 +279,9 @@ class AgentRepository:
             cur.execute(
                 """
                 insert into topics
-                    (title, angle, summary, raw_item_ids, target_platforms, status, embedding)
-                values (%s, %s, %s, %s, %s::platform[], 'candidate', %s::vector)
+                    (title, angle, summary, raw_item_ids, target_platforms, status,
+                     embedding, correlation_id)
+                values (%s, %s, %s, %s, %s::platform[], 'candidate', %s::vector, %s)
                 returning id
                 """,
                 (
@@ -278,6 +291,7 @@ class AgentRepository:
                     raw_item_ids,
                     target_platforms,
                     to_pgvector(embedding),
+                    _current_correlation_id(),
                 ),
             )
             row = cur.fetchone()
@@ -304,8 +318,8 @@ class AgentRepository:
                 """
                 insert into agent_runs
                     (job_type, entity_type, entity_id, langfuse_trace_id, model,
-                     prompt_version, tokens_in, tokens_out, cost_usd, status)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::agent_run_status)
+                     prompt_version, tokens_in, tokens_out, cost_usd, status, correlation_id)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::agent_run_status, %s)
                 returning id
                 """,
                 (
@@ -319,6 +333,7 @@ class AgentRepository:
                     run.tokens_out,
                     run.cost_usd,
                     run.status,
+                    run.correlation_id or _current_correlation_id(),
                 ),
             )
             row = cur.fetchone()
@@ -333,7 +348,8 @@ class AgentRepository:
                 update agent_runs
                 set langfuse_trace_id = %s, model = %s, prompt_version = %s,
                     tokens_in = %s, tokens_out = %s, cost_usd = %s,
-                    status = %s::agent_run_status, updated_at = now()
+                    status = %s::agent_run_status, correlation_id = coalesce(%s, correlation_id),
+                    updated_at = now()
                 where id = %s
                 """,
                 (
@@ -344,6 +360,7 @@ class AgentRepository:
                     run.tokens_out,
                     run.cost_usd,
                     run.status,
+                    run.correlation_id or _current_correlation_id(),
                     run_id,
                 ),
             )
@@ -353,15 +370,17 @@ class AgentRepository:
             cur.execute(
                 """
                 insert into topic_evaluations
-                    (topic_id, rubric_version, dimension_scores, total_score, rationale,
+                    (topic_id, rubric_version, dimension_scores, dimension_reasons,
+                     total_score, rationale,
                      judge_model, agent_run_id, weight_version, vetoed_dimension)
-                values (%s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s)
+                values (%s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s)
                 returning id
                 """,
                 (
                     evaluation.topic_id,
                     evaluation.rubric_version,
                     json.dumps(evaluation.dimension_scores, ensure_ascii=False),
+                    json.dumps(evaluation.dimension_reasons or {}, ensure_ascii=False),
                     evaluation.total_score,
                     evaluation.rationale,
                     evaluation.judge_model,

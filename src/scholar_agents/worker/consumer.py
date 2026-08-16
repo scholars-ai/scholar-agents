@@ -1,18 +1,15 @@
-"""pgmq 消费 worker（ADR-003）。
-
-纯 worker 纪律（SPEC-001 §2）：消费 job → 跑 Agent → 写结果表；
-绝不改业务状态机（那是 core 的唯一职责）。
-
-M0 骨架：只有注册表与消费循环；具体 handler 随 M1（sourcing/topic）逐个填充。
-"""
+"""pgmq Worker：消费、deadline、重试、死信、幂等与 Trace Context。"""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import signal
+import time
 import types
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -21,56 +18,48 @@ import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
 
+from scholar_agents import telemetry
 from scholar_agents.agents.judge import run_judge
 from scholar_agents.agents.scout import run_scout
 from scholar_agents.db_access import AgentRepository
+from scholar_agents.errors import JobError, PermanentJobError, ProviderError
+from scholar_agents.job_context import (
+    JobContext,
+    child_payload,
+    hard_deadline,
+    reset_current_job,
+    set_current_job,
+)
 from scholar_agents.observability import ObservedProvider, TraceRecorder
 from scholar_agents.providers.router import ModelRouter
-from scholar_agents.sourcing.handler import handle_source_fetch
+from scholar_agents.sourcing.handler import SourcingStats, handle_source_fetch
 
 log = structlog.get_logger()
 
-# 同一个 job 最多执行三次；供应商配额/认证类错误不应进入 visibility timeout 重试。
 MAX_JOB_ATTEMPTS = 3
 DEFAULT_SCOUT_MAX_ITEMS = 20
-_PERMANENT_ERROR_MARKERS = (
-    "quota",
-    "rate limit",
-    "insufficient balance",
-    "invalid api key",
-    "authentication",
-    "unauthorized",
-    "is required for provider",
-    "model not found",
-    "source ",
-    " has no url",
-    " not found",
-)
-
-
-class PermanentJobError(RuntimeError):
-    """当前 job 无法通过重试恢复，应直接进入失败/死信处理。"""
+DEFAULT_JOB_TIMEOUT_SECONDS = 240.0
+DEFAULT_VISIBILITY_GRACE_SECONDS = 30
 
 
 def is_permanent_error(exc: BaseException) -> bool:
-    """按供应商错误文本识别不可重试的额度、认证和模型配置错误。"""
-    message = str(exc).lower()
-    if "system is too busy" in message:
-        return False
-    return any(marker in message for marker in _PERMANENT_ERROR_MARKERS)
+    """只信任显式错误语义，不再解析供应商自然语言错误消息。"""
+    return isinstance(exc, JobError) and not exc.retryable
 
 
 def should_retry(exc: BaseException, read_count: int) -> bool:
-    """临时错误最多重试到 MAX_JOB_ATTEMPTS；永久错误永不重试。"""
-    return (
-        read_count < MAX_JOB_ATTEMPTS
-        and not isinstance(exc, PermanentJobError)
-        and not is_permanent_error(exc)
-    )
+    retryable = exc.retryable if isinstance(exc, JobError) else True
+    return read_count < MAX_JOB_ATTEMPTS and retryable
 
 
-# 队列名以 scholar-shared/schemas/queues.json 为准
-Handler = Callable[[Connection[Any], dict[str, Any]], None]
+def retry_delay_seconds(exc: BaseException, read_count: int) -> int:
+    retry_after = exc.retry_after_seconds if isinstance(exc, JobError) else None
+    if retry_after is not None:
+        return max(1, min(900, math.ceil(float(retry_after))))
+    return int(min(300, 15 * (2 ** max(0, read_count - 1))))
+
+
+Handler = Callable[[Connection[Any], dict[str, Any]], Any]
 HANDLERS: dict[str, Handler] = {}
 
 
@@ -83,29 +72,31 @@ def handler(queue: str) -> Callable[[Handler], Handler]:
 
 
 @handler("source_fetch")
-def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> None:
-    stats = handle_source_fetch(conn, payload)
-    scout_payload = _manual_scout_payload(payload, [str(item_id) for item_id in stats.item_ids])
-    if scout_payload is None:
-        return
-    with conn.cursor() as cur:
-        cur.execute(
-            "select pgmq.send(%s, %s::jsonb)",
-            ("topic_scout", json.dumps(scout_payload)),
-        )
-    conn.commit()
+def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> SourcingStats:
+    with telemetry.span("source_fetch.process"):
+        stats = handle_source_fetch(conn, payload)
+        scout_payload = _manual_scout_payload(payload, [str(item_id) for item_id in stats.item_ids])
+        if scout_payload is None:
+            return stats
+        downstream = child_payload(scout_payload)
+        with (
+            telemetry.span("messaging.publish", **{"messaging.destination.name": "topic_scout"}),
+            conn.cursor() as cur,
+        ):
+            cur.execute(
+                "select pgmq.send(%s, %s::jsonb)",
+                ("topic_scout", json.dumps(downstream)),
+            )
+        return stats
 
 
-def _manual_scout_payload(
-    payload: dict[str, Any], item_ids: list[str]
-) -> dict[str, Any] | None:
+def _manual_scout_payload(payload: dict[str, Any], item_ids: list[str]) -> dict[str, Any] | None:
     if not payload.get("url") or not item_ids:
         return None
     return {"rawItemIds": item_ids}
 
 
 def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
-    """Bound scheduled Scout work while preserving targeted manual ingest."""
     if raw_item_ids:
         return len(raw_item_ids)
     value = payload.get("maxItems", DEFAULT_SCOUT_MAX_ITEMS)
@@ -114,56 +105,60 @@ def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
 
 @handler("topic_scout")
 def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
-    router = ModelRouter.from_yaml(_routing_config_path())
-    provider, model = router.resolve("topic_scout")
-    trace = TraceRecorder(name="topic-scout")
-    trace.trace(metadata={"jobType": "topic.scout"})
-    provider = ObservedProvider(
-        provider,
-        trace,
-        observation_name="topic-scout-structured",
-        prompt_version="topic-scout@v1",
-    )
-    repository = AgentRepository(conn)
-    max_topics = payload.get("maxTopics")
-    raw_item_ids = [UUID(str(value)) for value in payload.get("rawItemIds", [])]
-    run_scout(
-        repository.list_new_raw_items(
-            limit=_scout_item_limit(payload, raw_item_ids),
-            raw_item_ids=raw_item_ids or None,
-        ),
-        provider,
-        model,
-        repository,
-        max_topics=int(max_topics) if max_topics is not None else None,
-        langfuse_trace_id=trace.trace_id,
-        targeted=bool(raw_item_ids),
-    )
+    with telemetry.span("topic_scout.process"):
+        router = ModelRouter.from_yaml(_routing_config_path())
+        provider, model = router.resolve("topic_scout")
+        trace = TraceRecorder(name="topic-scout")
+        trace.trace(metadata={"jobType": "topic.scout"})
+        provider = ObservedProvider(
+            provider,
+            trace,
+            observation_name="topic-scout-structured",
+            prompt_version="topic-scout@v1",
+        )
+        repository = AgentRepository(conn)
+        max_topics = payload.get("maxTopics")
+        raw_item_ids = [UUID(str(value)) for value in payload.get("rawItemIds", [])]
+        with telemetry.span("raw_items.load"):
+            items = repository.list_new_raw_items(
+                limit=_scout_item_limit(payload, raw_item_ids),
+                raw_item_ids=raw_item_ids or None,
+            )
+        run_scout(
+            items,
+            provider,
+            model,
+            repository,
+            max_topics=int(max_topics) if max_topics is not None else None,
+            langfuse_trace_id=trace.trace_id,
+            targeted=bool(raw_item_ids),
+        )
 
 
 @handler("topic_evaluate")
 def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
     topic_id = payload.get("topicId") or payload.get("topic_id")
     if not topic_id:
-        raise ValueError("topic_evaluate payload requires topicId")
-    router = ModelRouter.from_yaml(_routing_config_path())
-    provider, model = router.resolve("topic_judge")
-    trace = TraceRecorder(name="topic-judge")
-    trace.trace(metadata={"jobType": "topic.evaluate", "topicId": str(topic_id)})
-    observed_provider = ObservedProvider(
-        provider,
-        trace,
-        observation_name="topic-judge-structured",
-        prompt_version="topic-judge@v2",
-    )
-    run_judge(
-        topic_id,
-        observed_provider,
-        model,
-        AgentRepository(conn),
-        _rubric_path(),
-        recorder=trace,
-    )
+        raise PermanentJobError("topic_evaluate payload requires topicId")
+    with telemetry.span("topic_evaluate.process", **{"topic.id": str(topic_id)}):
+        router = ModelRouter.from_yaml(_routing_config_path())
+        provider, model = router.resolve("topic_judge")
+        trace = TraceRecorder(name="topic-judge")
+        trace.trace(metadata={"jobType": "topic.evaluate", "topicId": str(topic_id)})
+        observed_provider = ObservedProvider(
+            provider,
+            trace,
+            observation_name="topic-judge-structured",
+            prompt_version="topic-judge@v2",
+        )
+        run_judge(
+            topic_id,
+            observed_provider,
+            model,
+            AgentRepository(conn),
+            _rubric_path(),
+            recorder=trace,
+        )
 
 
 def _routing_config_path() -> Path:
@@ -179,75 +174,265 @@ def _connect_worker_database(dsn: str) -> Connection[Any]:
 
 
 class Worker:
-    def __init__(self, conn: Connection[Any], visibility_timeout: int = 300) -> None:
+    def __init__(
+        self,
+        conn: Connection[Any],
+        visibility_timeout: int = 300,
+        *,
+        job_timeout_seconds: float = DEFAULT_JOB_TIMEOUT_SECONDS,
+        queues: list[str] | None = None,
+    ) -> None:
         self._conn = conn
         self._vt = visibility_timeout
+        self._job_timeout = job_timeout_seconds
         self._running = True
+        selected = queues or list(HANDLERS)
+        unknown = set(selected) - set(HANDLERS)
+        if unknown:
+            raise ValueError(f"unknown worker queues: {sorted(unknown)}")
+        self._handlers = {queue: HANDLERS[queue] for queue in selected}
 
     def stop(self, _sig: int | None = None, _frm: types.FrameType | None = None) -> None:
         self._running = False
 
     def poll_once(self) -> bool:
-        """轮询所有已注册队列各一次；处理了任意消息返回 True。"""
+        """每个进程只轮询显式选择的队列；队列级并发由多进程部署提供。"""
         got = False
-        for queue, fn in HANDLERS.items():
-            with self._conn.cursor(row_factory=dict_row) as cur:
-                cur.execute(
-                    "select msg_id, read_ct, message from pgmq.read(%s, %s, 1)",
-                    (queue, self._vt),
-                )
-                row = cur.fetchone()
+        for queue, fn in self._handlers.items():
+            row = self._read(queue)
             if row is None:
                 continue
-            # pgmq.read changes the message visibility inside the current
-            # transaction. Commit that claim before running the handler so a
-            # handler failure cannot roll it back and hot-loop the same job.
             self._conn.commit()
             got = True
-            msg_id, read_count, payload = row["msg_id"], row["read_ct"], row["message"]
-            if isinstance(payload, str):  # psycopg 的 jsonb 通常已解码，防御字符串形态
+            msg_id = int(row["msg_id"])
+            read_count = int(row["read_ct"])
+            payload = row["message"]
+            if isinstance(payload, str):
                 payload = json.loads(payload)
-            log.info("job_start", queue=queue, msg_id=msg_id)
+            if not isinstance(payload, dict):
+                payload = {"value": payload}
+
+            context = JobContext.from_message(queue, msg_id, read_count, payload, self._job_timeout)
+            if self._already_completed(context.job_id):
+                self._delete(queue, msg_id)
+                self._conn.commit()
+                log.info("job_duplicate_deleted", queue=queue, msg_id=msg_id)
+                continue
+
+            lease_seconds = math.ceil(self._job_timeout + DEFAULT_VISIBILITY_GRACE_SECONDS)
+            self._set_visibility(queue, msg_id, lease_seconds)
+            self._conn.commit()
+            started_at = datetime.now(UTC)
+            token = set_current_job(context)
+            log.info(
+                "job_start",
+                queue=queue,
+                msg_id=msg_id,
+                job_id=str(context.job_id),
+                correlation_id=str(context.correlation_id),
+                attempt=read_count,
+            )
             try:
-                fn(self._conn, payload)
-            except Exception as exc:  # noqa: BLE001 — worker 边界必须兜住 job 异常
+                with (
+                    telemetry.job_span(context, payload),
+                    hard_deadline(context.remaining_seconds()),
+                ):
+                    result = fn(self._conn, payload)
+                self._record_source_fetch_run(
+                    context, payload, started_at, result=result, error=None
+                )
+                self._mark_completed(context)
+                self._delete(queue, msg_id)
+                self._conn.commit()
+                telemetry.record_job_outcome(context, "completed")
+                log.info("job_done", queue=queue, msg_id=msg_id)
+            except Exception as exc:  # noqa: BLE001 — job 边界必须兜住异常
+                self._conn.rollback()
                 retry = should_retry(exc, read_count)
+                error_type = _error_type(exc)
                 log.exception(
                     "job_failed",
                     queue=queue,
                     msg_id=msg_id,
                     read_count=read_count,
                     retry=retry,
+                    error_type=error_type,
                 )
-                self._conn.rollback()
-                if not retry:
-                    with self._conn.cursor() as cur:
-                        cur.execute("select pgmq.delete(%s, %s)", (queue, msg_id))
+                self._record_source_fetch_run(context, payload, started_at, result=None, error=exc)
+                if retry:
+                    delay = retry_delay_seconds(exc, read_count)
+                    self._set_visibility(queue, msg_id, delay)
                     self._conn.commit()
-                    log.error("job_discarded", queue=queue, msg_id=msg_id)
-            else:
-                with self._conn.cursor() as cur:
-                    cur.execute("select pgmq.delete(%s, %s)", (queue, msg_id))
-                self._conn.commit()
-                log.info("job_done", queue=queue, msg_id=msg_id)
+                    telemetry.record_job_outcome(context, "retry", error_type)
+                    log.warning("job_retry_scheduled", queue=queue, msg_id=msg_id, delay=delay)
+                else:
+                    self._archive_failure(context, payload, exc)
+                    self._conn.commit()
+                    telemetry.record_job_outcome(context, "dead_letter", error_type)
+                    log.error("job_dead_lettered", queue=queue, msg_id=msg_id)
+            finally:
+                reset_current_job(token)
         return got
+
+    def _read(self, queue: str) -> dict[str, Any] | None:
+        with (
+            telemetry.span("messaging.read", **{"messaging.destination.name": queue}),
+            self._conn.cursor(row_factory=dict_row) as cur,
+        ):
+            cur.execute(
+                "select msg_id, read_ct, message from pgmq.read(%s, %s, 1)",
+                (queue, self._vt),
+            )
+            return cur.fetchone()
+
+    def _set_visibility(self, queue: str, msg_id: int, seconds: int) -> None:
+        with (
+            telemetry.span("messaging.extend_visibility", **{"messaging.destination.name": queue}),
+            self._conn.cursor() as cur,
+        ):
+            cur.execute("select pgmq.set_vt(%s, %s, %s)", (queue, msg_id, seconds))
+
+    def _delete(self, queue: str, msg_id: int) -> None:
+        with (
+            telemetry.span("messaging.delete", **{"messaging.destination.name": queue}),
+            self._conn.cursor() as cur,
+        ):
+            cur.execute("select pgmq.delete(%s, %s)", (queue, msg_id))
+
+    def _already_completed(self, job_id: UUID) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute("select 1 from job_receipts where job_id = %s", (job_id,))
+            return cur.fetchone() is not None
+
+    def _mark_completed(self, context: JobContext) -> None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into job_receipts (job_id, queue, msg_id, correlation_id)
+                values (%s, %s, %s, %s)
+                on conflict (job_id) do nothing
+                """,
+                (context.job_id, context.queue, context.msg_id, context.correlation_id),
+            )
+
+    def _archive_failure(
+        self, context: JobContext, payload: dict[str, Any], exc: BaseException
+    ) -> None:
+        retryable = exc.retryable if isinstance(exc, JobError) else True
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into job_failures
+                    (queue, msg_id, job_id, correlation_id, payload, read_count,
+                     error_type, error_message, retryable, archived)
+                values (%s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s, true)
+                on conflict (queue, msg_id) do update set
+                    read_count = excluded.read_count,
+                    error_type = excluded.error_type,
+                    error_message = excluded.error_message,
+                    retryable = excluded.retryable,
+                    archived = true
+                """,
+                (
+                    context.queue,
+                    context.msg_id,
+                    context.job_id,
+                    context.correlation_id,
+                    json.dumps(payload, ensure_ascii=False, default=str),
+                    context.read_count,
+                    _error_type(exc),
+                    str(exc)[:2000],
+                    retryable,
+                ),
+            )
+            cur.execute("select pgmq.archive(%s, %s)", (context.queue, context.msg_id))
+
+    def _record_source_fetch_run(
+        self,
+        context: JobContext,
+        payload: dict[str, Any],
+        started_at: datetime,
+        *,
+        result: object,
+        error: BaseException | None,
+    ) -> None:
+        if context.queue != "source_fetch":
+            return
+        try:
+            source_id = UUID(str(payload.get("sourceId")))
+        except (TypeError, ValueError):
+            return
+        stats = result.as_dict() if isinstance(result, SourcingStats) else {}
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into source_fetch_runs
+                    (source_id, job_id, correlation_id, attempt, ok, stats,
+                     error_type, error_message, started_at, finished_at)
+                select %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, now()
+                where exists (select 1 from sources where id = %s)
+                """,
+                (
+                    source_id,
+                    context.job_id,
+                    context.correlation_id,
+                    context.read_count,
+                    error is None,
+                    json.dumps(stats),
+                    _error_type(error) if error else None,
+                    str(error)[:2000] if error else None,
+                    started_at,
+                    source_id,
+                ),
+            )
+
+
+def _error_type(exc: BaseException | None) -> str:
+    if exc is None:
+        return ""
+    if isinstance(exc, ProviderError):
+        return exc.error_code or f"provider_{exc.status_code or 'transport'}"
+    return type(exc).__name__
+
+
+def _selected_queues() -> list[str] | None:
+    raw = os.environ.get("WORKER_QUEUES", "").strip()
+    return [value.strip() for value in raw.split(",") if value.strip()] or None
 
 
 def main() -> None:
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:
         raise SystemExit("DATABASE_URL is required")
-    import time
-
-    with _connect_worker_database(dsn) as conn:
-        worker = Worker(conn)
-        signal.signal(signal.SIGINT, worker.stop)
-        signal.signal(signal.SIGTERM, worker.stop)
-        log.info("worker_started", queues=sorted(HANDLERS))
-        while worker._running:  # noqa: SLF001
-            if not worker.poll_once():
-                time.sleep(1.0)
-        log.info("worker_stopped")
+    try:
+        telemetry.init_telemetry()
+    except Exception as exc:  # noqa: BLE001 — 观测失败不能阻断业务
+        log.warning("telemetry_initialization_failed", error=str(exc))
+    try:
+        with _connect_worker_database(dsn) as conn:
+            worker = Worker(
+                conn,
+                visibility_timeout=int(os.environ.get("PGMQ_VISIBILITY_TIMEOUT_SECONDS", "300")),
+                job_timeout_seconds=float(
+                    os.environ.get("JOB_TIMEOUT_SECONDS", str(DEFAULT_JOB_TIMEOUT_SECONDS))
+                ),
+                queues=_selected_queues(),
+            )
+            signal.signal(signal.SIGINT, worker.stop)
+            signal.signal(signal.SIGTERM, worker.stop)
+            for queue in worker._handlers:  # noqa: SLF001
+                telemetry.worker_concurrency.add(1, {"queue": queue})
+            log.info("worker_started", queues=sorted(worker._handlers))  # noqa: SLF001
+            try:
+                while worker._running:  # noqa: SLF001
+                    if not worker.poll_once():
+                        time.sleep(1.0)
+                log.info("worker_stopped")
+            finally:
+                for queue in worker._handlers:  # noqa: SLF001
+                    telemetry.worker_concurrency.add(-1, {"queue": queue})
+    finally:
+        telemetry.shutdown_telemetry()
 
 
 if __name__ == "__main__":

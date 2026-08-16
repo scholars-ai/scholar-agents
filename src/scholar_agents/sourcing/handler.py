@@ -19,8 +19,11 @@ from uuid import UUID
 import structlog
 from psycopg import Connection
 
+from scholar_agents import telemetry
 from scholar_agents.db import to_pgvector
 from scholar_agents.embedding import EmbeddingError, embed
+from scholar_agents.errors import PermanentJobError
+from scholar_agents.job_context import current_job
 from scholar_agents.sourcing.fetcher import (
     FetchError,
     FullText,
@@ -102,15 +105,18 @@ def _source_config(row: dict[str, Any]) -> SourceConfig:
     """从 sources.fetch_config 读配置，缺省保守取值（signal + 不抓页面 + 默认上限）。"""
     cfg = row.get("fetch_config") or {}
     role: Role = "material" if cfg.get("role") == "material" else "signal"
-    full_text: FullText = (
-        "fetch_page" if cfg.get("full_text") == "fetch_page" else "rss_description"
-    )
+    full_text_value = cfg.get("fullText", cfg.get("full_text"))
+    full_text: FullText = "fetch_page" if full_text_value == "fetch_page" else "rss_description"
     return SourceConfig(
         role=role,
         full_text=full_text,
-        max_items=_positive_int(cfg.get("max_items"), DEFAULT_MAX_ITEMS, "max_items"),
+        max_items=_positive_int(
+            cfg.get("maxItems", cfg.get("max_items")), DEFAULT_MAX_ITEMS, "maxItems"
+        ),
         max_age_days=_positive_int(
-            cfg.get("max_age_days"), DEFAULT_MAX_AGE_DAYS, "max_age_days"
+            cfg.get("maxAgeDays", cfg.get("max_age_days")),
+            DEFAULT_MAX_AGE_DAYS,
+            "maxAgeDays",
         ),
     )
 
@@ -140,9 +146,7 @@ def _semantic_duplicate(
     return None
 
 
-def handle_source_fetch(
-    conn: Connection[dict[str, Any]], payload: dict[str, Any]
-) -> SourcingStats:
+def handle_source_fetch(conn: Connection[dict[str, Any]], payload: dict[str, Any]) -> SourcingStats:
     """采集一个信源，或处理手动投喂 payload 的单个 URL。"""
     source_id = payload["sourceId"]
     with conn.cursor() as cur:
@@ -152,13 +156,13 @@ def handle_source_fetch(
         )
         source = cur.fetchone()
     if source is None:
-        raise ValueError(f"source {source_id} not found")
+        raise PermanentJobError(f"source {source_id} not found")
     if not source["enabled"]:
         log.info("source_disabled_skip", source=source["name"])
         return SourcingStats()
     manual_url = payload.get("url")
     if not source["url"] and not manual_url:
-        raise ValueError(f"source {source['name']} has no url")
+        raise PermanentJobError(f"source {source['name']} has no url")
 
     cfg = _source_config(source)
     role, full_text = cfg.role, cfg.full_text
@@ -169,7 +173,7 @@ def handle_source_fetch(
         if item is None:
             stats.failed = 1
             return stats
-        return _store_item(conn, source, item, stats)
+        return _store_item(conn, source, item, stats, ingest_note=payload.get("note"))
 
     all_entries = fetch_feed(source["url"])  # 整个 feed 拉不动 → 抛 FetchError，由 worker 重试
     entries = all_entries[: cfg.max_items]
@@ -185,29 +189,26 @@ def handle_source_fetch(
 
     for entry in entries:
         try:
-            # 时效性过滤放在 build_item 之前：早于窗口的条目连页面都不抓、
-            # 更不做 embedding（OpenAI 的 news RSS 实测回溯数年，1115 条历史归档）
-            published = entry_published(entry)
-            if published is not None and published < cutoff:
-                stats.too_old += 1
-                continue
+            with conn.transaction():
+                # 每条 entry 使用 savepoint；单条失败不会回滚本 job 已处理的其他条目。
+                published = entry_published(entry)
+                if published is not None and published < cutoff:
+                    stats.too_old += 1
+                    continue
 
-            item = build_item(entry, role=role, full_text=full_text)
-            if item is None:
-                stats.skipped += 1
-                continue
+                item = build_item(entry, role=role, full_text=full_text)
+                if item is None:
+                    stats.skipped += 1
+                    continue
 
-            # 精确去重：content_hash 有 unique 约束，先查省掉一次异常往返
-            _store_item(conn, source, item, stats)
+                _store_item(conn, source, item, stats)
 
         except (EmbeddingError, FetchError) as exc:
             # 单条失败不拖垮整个源（SPEC-008 §6：单源失败隔离的条目级版本）
             stats.failed += 1
-            conn.rollback()
             log.warning("item_failed", source=source["name"], error=str(exc)[:150])
         except Exception as exc:  # noqa: BLE001 — 逐条兜底，避免一条脏数据毁掉整批
             stats.failed += 1
-            conn.rollback()
             log.warning(
                 "item_failed_unexpected",
                 source=source["name"],
@@ -219,13 +220,20 @@ def handle_source_fetch(
 
 
 def _store_item(
-    conn: Connection[dict[str, Any]], source: dict[str, Any], item: Any, stats: SourcingStats
+    conn: Connection[dict[str, Any]],
+    source: dict[str, Any],
+    item: Any,
+    stats: SourcingStats,
+    *,
+    ingest_note: object = None,
 ) -> SourcingStats:
-    with conn.cursor() as cur:
+    job = current_job()
+    with telemetry.span("duplicate.exact_check"), conn.cursor() as cur:
         cur.execute("select 1 from raw_items where content_hash = %s", (item.content_hash,))
         existing = cur.fetchone()
         if existing:
             stats.dup_exact += 1
+            telemetry.duplicates.add(1, {"duplicate_type": "exact"})
             cur.execute("select id from raw_items where content_hash = %s", (item.content_hash,))
             row = cur.fetchone()
             if row is not None:
@@ -233,9 +241,11 @@ def _store_item(
             return stats
 
     vec = embed(f"{item.title}\n\n{item.content}")
-    dup = _semantic_duplicate(conn, vec)
+    with telemetry.span("duplicate.semantic_check"):
+        dup = _semantic_duplicate(conn, vec)
     if dup is not None:
         stats.dup_semantic += 1
+        telemetry.duplicates.add(1, {"duplicate_type": "semantic"})
         log.info(
             "semantic_duplicate",
             title=item.title[:50],
@@ -244,13 +254,13 @@ def _store_item(
         )
         return stats
 
-    with conn.cursor() as cur:
+    with telemetry.span("raw_item.insert"), conn.cursor() as cur:
         cur.execute(
             """
             insert into raw_items
                 (source_id, title, url, author, content, published_at,
-                 content_hash, embedding, status)
-            values (%s, %s, %s, %s, %s, %s, %s, %s::vector, 'new')
+                 content_hash, embedding, status, correlation_id, ingest_note)
+            values (%s, %s, %s, %s, %s, %s, %s, %s::vector, 'new', %s, %s)
             on conflict (content_hash) do nothing
             returning id
             """,
@@ -263,11 +273,13 @@ def _store_item(
                 item.published_at,
                 item.content_hash,
                 to_pgvector(vec),
+                job.correlation_id if job else None,
+                str(ingest_note) if ingest_note is not None else None,
             ),
         )
         row = cur.fetchone()
         if row is not None:
             stats.inserted += 1
+            telemetry.items_inserted.add(1, {"job_type": "source_fetch"})
             stats.item_ids.append(UUID(str(row["id"])))
-    conn.commit()
     return stats

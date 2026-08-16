@@ -11,6 +11,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel
 
+from scholar_agents.errors import PermanentJobError
 from scholar_agents.providers.anthropic_provider import AnthropicProvider
 from scholar_agents.providers.base import ChatRequest, ChatResponse, ModelProvider
 from scholar_agents.providers.openai_provider import OpenAICompatProvider
@@ -44,13 +45,17 @@ class ModelRouter:
         """task 名 → (provider 实例, model 名)。未注册的 task 直接抛错，不静默兜底。"""
         route = self._config.tasks.get(task)
         if route is None:
-            raise KeyError(f"no model route for task {task!r}; add it to model_routing.yaml")
+            raise PermanentJobError(
+                f"no model route for task {task!r}; add it to model_routing.yaml"
+            )
         provider_name, _, model = route.partition("/")
         if not model:
-            raise ValueError(f"bad route for task {task!r}: {route!r} (want 'provider/model')")
+            raise PermanentJobError(
+                f"bad route for task {task!r}: {route!r} (want 'provider/model')"
+            )
         cfg = self._config.providers.get(provider_name)
         if cfg is None:
-            raise KeyError(f"unknown provider {provider_name!r} in model_routing.yaml")
+            raise PermanentJobError(f"unknown provider {provider_name!r} in model_routing.yaml")
         selected_model = os.environ.get(cfg.model_env, "") if cfg.model_env else ""
         return self._provider(provider_name), selected_model or model
 
@@ -63,10 +68,10 @@ class ModelRouter:
             return self._instances[name]
         cfg = self._config.providers.get(name)
         if cfg is None:
-            raise KeyError(f"unknown provider {name!r} in model_routing.yaml")
+            raise PermanentJobError(f"unknown provider {name!r} in model_routing.yaml")
         api_key = os.environ.get(cfg.api_key_env)
         if not api_key:
-            raise RuntimeError(f"env {cfg.api_key_env} is required for provider {name!r}")
+            raise PermanentJobError(f"env {cfg.api_key_env} is required for provider {name!r}")
 
         provider: ModelProvider
         if cfg.protocol == "anthropic":
@@ -79,6 +84,6 @@ class ModelRouter:
                 json_mode=cfg.json_mode,
             )
         else:
-            raise ValueError(f"unknown protocol {cfg.protocol!r} for provider {name!r}")
+            raise PermanentJobError(f"unknown protocol {cfg.protocol!r} for provider {name!r}")
         self._instances[name] = provider
         return provider

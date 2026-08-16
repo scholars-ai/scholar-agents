@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from scholar_agents.errors import ProviderError
 from scholar_agents.worker.consumer import (
     HANDLERS,
     MAX_JOB_ATTEMPTS,
@@ -50,21 +51,33 @@ def test_targeted_scout_keeps_all_requested_items() -> None:
 
 
 @pytest.mark.parametrize(
-    ("message", "expected"),
+    ("error", "expected"),
     [
-        ("quota exceeded", True),
-        ("insufficient balance", True),
-        ("invalid api key", True),
-        ("model not found", True),
-        ("env ANTHROPIC_API_KEY is required for provider 'anthropic'", True),
-        ("source Manual Feed has no url", True),
-        ("source source-1 not found", True),
-        ("429 rate limiting: system is too busy now", False),
-        ("connection reset by peer", False),
+        (
+            ProviderError(
+                "quota exceeded",
+                provider="openai",
+                status_code=429,
+                error_code="insufficient_quota",
+                retryable=False,
+            ),
+            True,
+        ),
+        (
+            ProviderError(
+                "temporarily rate limited",
+                provider="anthropic",
+                status_code=429,
+                error_code="rate_limit_error",
+                retryable=True,
+            ),
+            False,
+        ),
+        (RuntimeError("connection reset by peer"), False),
     ],
 )
-def test_classifies_provider_errors_for_retry(message: str, expected: bool) -> None:
-    assert is_permanent_error(RuntimeError(message)) is expected
+def test_classifies_typed_provider_errors_for_retry(error: BaseException, expected: bool) -> None:
+    assert is_permanent_error(error) is expected
 
 
 def test_permanent_job_error_is_always_non_retryable() -> None:
@@ -117,13 +130,16 @@ def test_worker_keeps_failed_message_claim_until_visibility_timeout(
             self.rollbacks += 1
 
     queue = "source_fetch"
-    monkeypatch.setitem(HANDLERS, queue, lambda _conn, _payload: (_ for _ in ()).throw(
-        RuntimeError("temporary")
-    ))
+    monkeypatch.setitem(
+        HANDLERS, queue, lambda _conn, _payload: (_ for _ in ()).throw(RuntimeError("temporary"))
+    )
     conn = FakeConnection()
     assert Worker(conn, visibility_timeout=30).poll_once()
-    assert conn.commits == 1
+    # claim、初始 lease、失败退避各自提交，消息不会因 rollback 立即重现。
+    assert conn.commits == 3
     assert conn.rollbacks == 1
+    set_vt_calls = [call for call in conn.cursor_instance.executed if "pgmq.set_vt" in call[0]]
+    assert [call[1][2] for call in set_vt_calls] == [270, 15]
 
 
 def test_worker_connection_uses_dict_rows(monkeypatch: pytest.MonkeyPatch) -> None:

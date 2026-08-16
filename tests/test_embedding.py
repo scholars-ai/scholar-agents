@@ -31,8 +31,10 @@ class TestSiliconFlowBackend:
 
     def test_returns_normalized_1024_dims(self) -> None:
         client = self._patch_client(_fake_sf_response(1024, scale=7.0))
-        with patch.object(emb, "SF_API_KEY", "sk-test"), \
-             patch("openai.OpenAI", return_value=client):
+        with (
+            patch.object(emb, "SF_API_KEY", "sk-test"),
+            patch("openai.OpenAI", return_value=client),
+        ):
             vec = emb._embed_siliconflow("hello")
         assert len(vec) == emb.EMBED_DIM == 1024
         assert math.isclose(math.sqrt(sum(x * x for x in vec)), 1.0, abs_tol=1e-6)
@@ -40,29 +42,37 @@ class TestSiliconFlowBackend:
     def test_truncates_longer_vectors_to_contract_dim(self) -> None:
         # 模型返回 2560 维（如 Qwen3-Embedding-4B 默认）→ 截断到 1024
         client = self._patch_client(_fake_sf_response(2560))
-        with patch.object(emb, "SF_API_KEY", "sk-test"), \
-             patch("openai.OpenAI", return_value=client):
+        with (
+            patch.object(emb, "SF_API_KEY", "sk-test"),
+            patch("openai.OpenAI", return_value=client),
+        ):
             vec = emb._embed_siliconflow("hello")
         assert len(vec) == 1024
 
     def test_raises_when_dims_too_few(self) -> None:
         # 返回 768 维（如 bge-large）→ 不足契约维度，必须炸而不是零填充
         client = self._patch_client(_fake_sf_response(768))
-        with patch.object(emb, "SF_API_KEY", "sk-test"), \
-             patch("openai.OpenAI", return_value=client), \
-             pytest.raises(emb.EmbeddingError, match="768 dims"):
+        with (
+            patch.object(emb, "SF_API_KEY", "sk-test"),
+            patch("openai.OpenAI", return_value=client),
+            pytest.raises(emb.EmbeddingError, match="768 dims"),
+        ):
             emb._embed_siliconflow("hello")
 
     def test_raises_without_api_key(self) -> None:
-        with patch.object(emb, "SF_API_KEY", ""), \
-             pytest.raises(emb.EmbeddingError, match="SF_API_KEY"):
+        with (
+            patch.object(emb, "SF_API_KEY", ""),
+            pytest.raises(emb.EmbeddingError, match="SF_API_KEY"),
+        ):
             emb._embed_siliconflow("hello")
 
     def test_truncates_input_to_max_chars(self) -> None:
         client = self._patch_client(_fake_sf_response(1024))
-        with patch.object(emb, "SF_API_KEY", "sk-test"), \
-             patch.object(emb, "MAX_CHARS", 10), \
-             patch("openai.OpenAI", return_value=client):
+        with (
+            patch.object(emb, "SF_API_KEY", "sk-test"),
+            patch.object(emb, "MAX_CHARS", 10),
+            patch("openai.OpenAI", return_value=client),
+        ):
             emb._embed_siliconflow("x" * 500)
         sent = client.embeddings.create.call_args.kwargs["input"]
         assert len(sent) == 10, "过长输入必须截断，否则 CPU/额度成本失控"
@@ -70,9 +80,11 @@ class TestSiliconFlowBackend:
     def test_api_error_becomes_embedding_error(self) -> None:
         client = MagicMock()
         client.embeddings.create.side_effect = RuntimeError("upstream 503")
-        with patch.object(emb, "SF_API_KEY", "sk-test"), \
-             patch("openai.OpenAI", return_value=client), \
-             pytest.raises(emb.EmbeddingError, match="siliconflow embed failed"):
+        with (
+            patch.object(emb, "SF_API_KEY", "sk-test"),
+            patch("openai.OpenAI", return_value=client),
+            pytest.raises(emb.EmbeddingError, match="siliconflow embed failed"),
+        ):
             emb._embed_siliconflow("hello")
 
 
@@ -93,8 +105,10 @@ class TestOllamaBackend:
         resp = MagicMock()
         resp.raise_for_status = MagicMock()
         resp.json.return_value = {"embeddings": [[0.0] * 1024]}
-        with patch("httpx.post", return_value=resp), \
-             pytest.raises(emb.EmbeddingError, match="norm is zero"):
+        with (
+            patch("httpx.post", return_value=resp),
+            pytest.raises(emb.EmbeddingError, match="norm is zero"),
+        ):
             emb._embed_ollama("hello")
 
 
@@ -109,8 +123,10 @@ class TestBackendSwitch:
             called["ollama"] = True
             return [1.0] + [0.0] * 1023
 
-        with patch.object(emb, "EMBED_BACKEND", "ollama"), \
-             patch.object(emb, "_embed_ollama", fake_ollama):
+        with (
+            patch.object(emb, "EMBED_BACKEND", "ollama"),
+            patch.object(emb, "_embed_ollama", fake_ollama),
+        ):
             emb.embed("hello")
         assert called.get("ollama")
 

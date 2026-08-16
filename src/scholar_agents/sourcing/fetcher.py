@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -20,6 +21,8 @@ import feedparser
 import httpx
 import structlog
 import trafilatura
+
+from scholar_agents import telemetry
 
 log = structlog.get_logger()
 
@@ -52,11 +55,17 @@ class FetchError(RuntimeError):
 
 def fetch_feed(url: str, *, timeout: float = 45.0) -> list[dict[str, Any]]:
     """拉取并解析 feed，返回 entry 列表。"""
-    try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True, headers={"User-Agent": UA})
-        resp.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise FetchError(f"feed request failed: {exc}") from exc
+    started = time.monotonic()
+    with telemetry.span("feed.fetch"):
+        try:
+            resp = httpx.get(
+                url, timeout=timeout, follow_redirects=True, headers={"User-Agent": UA}
+            )
+            resp.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise FetchError(f"feed request failed: {exc}") from exc
+        finally:
+            telemetry.feed_fetch_duration.record(time.monotonic() - started)
 
     parsed = feedparser.parse(resp.content)
     # feedparser 对轻微畸形会置 bozo 但仍可能解析出条目：有条目就继续，没条目才算失败
@@ -101,14 +110,23 @@ def _clean_html(html: str) -> str:
 
 def fetch_page_text(url: str, *, timeout: float = 45.0) -> str:
     """抓原文页并提取正文。失败返回空串——由调用方决定要不要降级用摘要。"""
-    try:
-        resp = httpx.get(url, timeout=timeout, follow_redirects=True, headers={"User-Agent": UA})
-        resp.raise_for_status()
-        extracted = trafilatura.extract(resp.text, include_comments=False, include_tables=True)
-        return (extracted or "").strip()
-    except (httpx.HTTPError, ValueError) as exc:
-        log.warning("page_fetch_failed", url=url, error=str(exc)[:120])
-        return ""
+    started = time.monotonic()
+    with telemetry.span("page.fetch"):
+        try:
+            resp = httpx.get(
+                url, timeout=timeout, follow_redirects=True, headers={"User-Agent": UA}
+            )
+            resp.raise_for_status()
+            with telemetry.span("content.extract"):
+                extracted = trafilatura.extract(
+                    resp.text, include_comments=False, include_tables=True
+                )
+            return (extracted or "").strip()
+        except (httpx.HTTPError, ValueError) as exc:
+            log.warning("page_fetch_failed", error=str(exc)[:120])
+            return ""
+        finally:
+            telemetry.page_fetch_duration.record(time.monotonic() - started)
 
 
 def published_at(entry: dict[str, Any]) -> datetime | None:

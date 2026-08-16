@@ -9,6 +9,7 @@ from typing import Any, Protocol
 import yaml
 from scholar_contracts.models import TopicJudgeOutput
 
+from scholar_agents import telemetry
 from scholar_agents.db_access import (
     AgentRunInsert,
     RawItemRecord,
@@ -99,14 +100,18 @@ def run_judge(
     recorder: TraceRecorder | None = None,
     cold_start: bool = True,
 ) -> JudgeResult:
-    rubric = load_topic_rubric(rubric_path)
-    topic = repository.get_topic(topic_id)
+    with telemetry.span("rubric.load"):
+        rubric = load_topic_rubric(rubric_path)
+    with telemetry.span("topic.load", **{"topic.id": str(topic_id)}):
+        topic = repository.get_topic(topic_id)
     if topic is None:
         raise TopicJudgeError(f"topic {topic_id} not found")
-    weight_set = repository.get_active_weight_set(rubric.rubric_id)
+    with telemetry.span("weight_set.load"):
+        weight_set = repository.get_active_weight_set(rubric.rubric_id)
     if weight_set is None:
         raise TopicJudgeError(f"no active weight set for {rubric.rubric_id!r}")
-    raw_items = repository.list_topic_raw_items(topic)
+    with telemetry.span("topic.materials.load", **{"topic.id": str(topic.id)}):
+        raw_items = repository.list_topic_raw_items(topic)
     system, user = build_judge_prompt(topic, raw_items, rubric)
     trace = recorder or TraceRecorder(name="topic-judge")
     run_id = repository.create_agent_run(
@@ -132,39 +137,43 @@ def run_judge(
             TopicJudgeOutput.model_json_schema(),
         )
         output = parse_judge_output(data)
-        scores = {
-            key: getattr(output.dimensionScores, key).score
-            for key in rubric.dimension_keys
+        scores = {key: getattr(output.dimensionScores, key).score for key in rubric.dimension_keys}
+        reasons = {
+            key: getattr(output.dimensionScores, key).reason for key in rubric.dimension_keys
         }
-        score = recompute_topic_score(rubric, weight_set, scores, cold_start=cold_start)
-        evaluation_id = repository.create_topic_evaluation(
-            TopicEvaluationInsert(
-                topic_id=topic.id,
-                rubric_version=rubric.version,
-                dimension_scores=scores,
-                total_score=score.total_score,
-                rationale=output.rationale,
-                judge_model=model,
-                agent_run_id=run_id,
-                weight_version=weight_set.version,
-                vetoed_dimension=score.vetoed_dimension,
+        with telemetry.span("score.recompute"):
+            score = recompute_topic_score(rubric, weight_set, scores, cold_start=cold_start)
+        with telemetry.span("evaluation.insert", **{"topic.id": str(topic.id)}):
+            evaluation_id = repository.create_topic_evaluation(
+                TopicEvaluationInsert(
+                    topic_id=topic.id,
+                    rubric_version=rubric.version,
+                    dimension_scores=scores,
+                    dimension_reasons=reasons,
+                    total_score=score.total_score,
+                    rationale=output.rationale,
+                    judge_model=model,
+                    agent_run_id=run_id,
+                    weight_version=weight_set.version,
+                    vetoed_dimension=score.vetoed_dimension,
+                )
             )
-        )
-        repository.update_agent_run(
-            run_id,
-            AgentRunInsert(
-                job_type="topic.evaluate",
-                entity_type="topic",
-                entity_id=topic.id,
-                model=model,
-                prompt_version=PROMPT_VERSION,
-                tokens_in=usage.input_tokens,
-                tokens_out=usage.output_tokens,
-                cost_usd=None,
-                langfuse_trace_id=trace.trace_id,
-                status="succeeded",
-            ),
-        )
+        with telemetry.span("agent_run.update"):
+            repository.update_agent_run(
+                run_id,
+                AgentRunInsert(
+                    job_type="topic.evaluate",
+                    entity_type="topic",
+                    entity_id=topic.id,
+                    model=model,
+                    prompt_version=PROMPT_VERSION,
+                    tokens_in=usage.input_tokens,
+                    tokens_out=usage.output_tokens,
+                    cost_usd=None,
+                    langfuse_trace_id=trace.trace_id,
+                    status="succeeded",
+                ),
+            )
         trace.score(name="topic_total_score", value=score.total_score, comment=output.rationale)
         return JudgeResult(evaluation_id, run_id, usage, score.total_score, score.vetoed_dimension)
     except StructuredOutputError as exc:

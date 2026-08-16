@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import time
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -10,6 +11,7 @@ from uuid import UUID, uuid4
 import httpx
 import structlog
 
+from scholar_agents import telemetry
 from scholar_agents.providers.base import ChatRequest, ChatResponse, ModelProvider
 
 log = structlog.get_logger()
@@ -148,15 +150,31 @@ class ObservedProvider:
         self.name = provider.name
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:
-        response = self._provider.complete(model, req)
-        self._recorder.generation(
-            model=model,
-            request=req,
-            response=response,
-            observation_name=self._observation_name,
-            prompt_version=self._prompt_version,
-        )
-        return response
+        started = time.monotonic()
+        attributes = {
+            "gen_ai.system": self.name,
+            "gen_ai.request.model": model,
+            "gen_ai.operation.name": "chat",
+            "langfuse.trace_id": self._recorder.trace_id,
+        }
+        if self._prompt_version:
+            attributes["prompt.version"] = self._prompt_version
+        with telemetry.span(f"llm.{self._observation_name}", **attributes) as current_span:
+            response = self._provider.complete(model, req)
+            current_span.set_attribute("gen_ai.usage.input_tokens", response.usage.input_tokens)
+            current_span.set_attribute("gen_ai.usage.output_tokens", response.usage.output_tokens)
+            telemetry.llm_duration.record(
+                time.monotonic() - started,
+                {"provider": self.name, "model": model},
+            )
+            self._recorder.generation(
+                model=model,
+                request=req,
+                response=response,
+                observation_name=self._observation_name,
+                prompt_version=self._prompt_version,
+            )
+            return response
 
 
 def _request_payload(request: ChatRequest) -> dict[str, Any]:

@@ -14,6 +14,7 @@ from uuid import UUID
 
 from scholar_contracts.models import TopicDraft, TopicScoutOutput
 
+from scholar_agents import telemetry
 from scholar_agents.db_access import AgentRunInsert, RawItemRecord
 from scholar_agents.embedding import cosine
 from scholar_agents.providers.base import ModelProvider, Usage
@@ -111,9 +112,7 @@ def format_cluster_context(items: list[RawItemRecord]) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def build_scout_prompt(
-    items: list[RawItemRecord], *, targeted: bool = False
-) -> tuple[str, str]:
+def build_scout_prompt(items: list[RawItemRecord], *, targeted: bool = False) -> tuple[str, str]:
     """构造 TopicScout 的系统提示和素材上下文。"""
     system = """你是 TopicScout，负责把资讯素材聚合成可创作的选题。
 
@@ -158,9 +157,7 @@ def parse_scout_output(data: dict[str, Any], items: list[RawItemRecord]) -> list
         unique_ids: list[UUID] = []
         for raw_item_id in draft.rawItemIds:
             if raw_item_id not in allowed_ids:
-                raise ScoutOutputError(
-                    f"raw item {raw_item_id} is not in the input cluster"
-                )
+                raise ScoutOutputError(f"raw item {raw_item_id} is not in the input cluster")
             if raw_item_id not in unique_ids:
                 unique_ids.append(raw_item_id)
         drafts.append(draft.model_copy(update={"rawItemIds": unique_ids}))
@@ -186,7 +183,8 @@ def run_scout(
     created_topics = 0
     clusters_processed = 0
     total_usage = Usage()
-    clusters = cluster_raw_items(items)
+    with telemetry.span("embedding.cluster"):
+        clusters = cluster_raw_items(items)
     try:
         for cluster in clusters:
             if max_topics is not None and created_topics >= max_topics:
@@ -206,19 +204,24 @@ def run_scout(
             for draft in drafts:
                 if max_topics is not None and created_topics >= max_topics:
                     break
-                topic_embedding = embedder(f"{draft.title}\n\n{draft.angle}\n\n{draft.summary}")
-                if repository.find_similar_topic(topic_embedding) is not None:
+                with telemetry.span("topic.embedding"):
+                    topic_embedding = embedder(f"{draft.title}\n\n{draft.angle}\n\n{draft.summary}")
+                with telemetry.span("topic.duplicate_check"):
+                    duplicate = repository.find_similar_topic(topic_embedding)
+                if duplicate is not None:
                     continue
-                repository.create_topic(
-                    title=draft.title,
-                    angle=draft.angle,
-                    summary=draft.summary,
-                    raw_item_ids=draft.rawItemIds,
-                    target_platforms=[platform.value for platform in draft.targetPlatforms],
-                    embedding=topic_embedding,
-                )
+                with telemetry.span("topic.insert"):
+                    repository.create_topic(
+                        title=draft.title,
+                        angle=draft.angle,
+                        summary=draft.summary,
+                        raw_item_ids=draft.rawItemIds,
+                        target_platforms=[platform.value for platform in draft.targetPlatforms],
+                        embedding=topic_embedding,
+                    )
                 created_topics += 1
-            repository.mark_raw_items_clustered([item.id for item in cluster])
+            with telemetry.span("raw_items.mark_clustered"):
+                repository.mark_raw_items_clustered([item.id for item in cluster])
     except StructuredOutputError as exc:
         total_usage.input_tokens += exc.usage.input_tokens
         total_usage.output_tokens += exc.usage.output_tokens

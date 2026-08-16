@@ -11,6 +11,7 @@ from typing import Any
 import structlog
 from jsonschema import Draft7Validator
 
+from scholar_agents import telemetry
 from scholar_agents.providers.base import (
     ChatRequest,
     Message,
@@ -65,6 +66,8 @@ def complete_structured(
                 return data, total
 
         log.warning("structured_retry", attempt=attempt, errors=errors[:3])
+        if attempt < max_attempts:
+            telemetry.structured_retries.add(1, {"provider": provider.name, "model": model})
         messages = [
             UserMessage(
                 content=(
@@ -75,6 +78,4 @@ def complete_structured(
             )
         ]
 
-    raise StructuredOutputError(
-        f"no valid structured output after {max_attempts} attempts", total
-    )
+    raise StructuredOutputError(f"no valid structured output after {max_attempts} attempts", total)

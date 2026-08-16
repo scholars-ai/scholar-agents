@@ -212,6 +212,7 @@ def test_run_judge_recomputes_and_persists_score() -> None:
     assert result.usage.output_tokens == 34
     assert repository.evaluations[0].weight_version == 7
     assert repository.evaluations[0].vetoed_dimension is None
+    assert set(repository.evaluations[0].dimension_reasons) == set(rubric.dimension_keys)
     assert repository.runs[0].prompt_version == PROMPT_VERSION
     assert repository.updates[-1][1].prompt_version == PROMPT_VERSION
     assert repository.updates[-1][1].status == "succeeded"

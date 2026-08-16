@@ -13,12 +13,17 @@ from __future__ import annotations
 
 import math
 import os
+import time
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     pass
 
 import structlog
+
+from scholar_agents import telemetry
+from scholar_agents.errors import JobError
+from scholar_agents.job_context import current_job
 
 log = structlog.get_logger()
 
@@ -42,8 +47,12 @@ OLLAMA_KEEP_ALIVE = os.environ.get("OLLAMA_KEEP_ALIVE", "10m")
 MAX_CHARS = int(os.environ.get("EMBED_MAX_CHARS", "600"))
 
 
-class EmbeddingError(RuntimeError):
+class EmbeddingError(JobError):
     """embedding 服务不可用或返回非预期向量 —— 契约错误，不静默兜底。"""
+
+
+class PermanentEmbeddingError(EmbeddingError):
+    retryable = False
 
 
 def _l2_normalize(vec: list[float]) -> list[float]:
@@ -56,10 +65,17 @@ def _l2_normalize(vec: list[float]) -> list[float]:
 def _embed_siliconflow(text: str) -> list[float]:
     """via OpenAI-compatible API（SiliconFlow / 任何兼容端点）。"""
     if not SF_API_KEY:
-        raise EmbeddingError("SF_API_KEY is not set; set EMBED_BACKEND=ollama to use local Ollama")
+        raise PermanentEmbeddingError(
+            "SF_API_KEY is not set; set EMBED_BACKEND=ollama to use local Ollama"
+        )
     try:
         from openai import OpenAI  # openai 已在 agents 依赖里
-        client = OpenAI(api_key=SF_API_KEY, base_url=SF_BASE_URL)
+
+        job = current_job()
+        timeout = min(120.0, job.remaining_seconds()) if job else 120.0
+        client = OpenAI(
+            api_key=SF_API_KEY, base_url=SF_BASE_URL, timeout=max(1.0, timeout), max_retries=0
+        )
         resp = client.embeddings.create(model=SF_MODEL, input=text[:MAX_CHARS])
         vec = resp.data[0].embedding
     except Exception as exc:
@@ -78,6 +94,7 @@ def _embed_siliconflow(text: str) -> list[float]:
 def _embed_ollama(text: str) -> list[float]:
     """via 本机 Ollama（离线/调试用，生产建议用 siliconflow）。"""
     import httpx
+
     payload = {"model": OLLAMA_MODEL, "input": text[:MAX_CHARS], "keep_alive": OLLAMA_KEEP_ALIVE}
     try:
         resp = httpx.post(f"{OLLAMA_HOST}/api/embed", json=payload, timeout=120.0)
@@ -90,17 +107,27 @@ def _embed_ollama(text: str) -> list[float]:
         raise EmbeddingError(f"ollama returned no embedding: keys={list(data)}")
     raw = vectors[0]
     if len(raw) < EMBED_DIM:
-        raise EmbeddingError(
-            f"model {OLLAMA_MODEL} returned {len(raw)} dims, need >= {EMBED_DIM}"
-        )
+        raise EmbeddingError(f"model {OLLAMA_MODEL} returned {len(raw)} dims, need >= {EMBED_DIM}")
     return _l2_normalize(raw[:EMBED_DIM])
 
 
 def embed(text: str) -> list[float]:
     """返回 EMBED_DIM 维、L2 归一化的向量。后端由 EMBED_BACKEND 控制。"""
-    if EMBED_BACKEND == "ollama":
-        return _embed_ollama(text)
-    return _embed_siliconflow(text)
+    started = time.monotonic()
+    with telemetry.span("embedding.request", provider=EMBED_BACKEND, model=_embedding_model()):
+        try:
+            if EMBED_BACKEND == "ollama":
+                return _embed_ollama(text)
+            return _embed_siliconflow(text)
+        finally:
+            telemetry.embedding_duration.record(
+                time.monotonic() - started,
+                {"provider": EMBED_BACKEND, "model": _embedding_model()},
+            )
+
+
+def _embedding_model() -> str:
+    return OLLAMA_MODEL if EMBED_BACKEND == "ollama" else SF_MODEL
 
 
 def cosine(a: list[float], b: list[float]) -> float:

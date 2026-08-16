@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 import openai
 
+from scholar_agents.errors import normalize_provider_error
+from scholar_agents.job_context import current_job
 from scholar_agents.providers.base import (
     AssistantMessage,
     ChatRequest,
@@ -107,8 +109,15 @@ class OpenAICompatProvider:
                 }
         if req.temperature is not None:
             kwargs["temperature"] = req.temperature
+        job = current_job()
+        if job is not None:
+            job.raise_if_expired()
+            kwargs["timeout"] = max(1.0, min(_request_timeout(), job.remaining_seconds()))
 
-        resp = self._client.chat.completions.create(**kwargs)
+        try:
+            resp = self._client.chat.completions.create(**kwargs)
+        except openai.OpenAIError as exc:
+            raise normalize_provider_error(self.name, exc) from exc
         choice = resp.choices[0]
 
         usage = Usage()
