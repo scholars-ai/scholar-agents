@@ -267,3 +267,19 @@ tasks:
     _, model = ModelRouter.from_yaml(config).resolve("topic_scout")
 
     assert model == "claude-opus-4-8"
+
+
+def test_production_quality_tasks_use_vtrix_gpt_5_6_sol() -> None:
+    config = Path(__file__).parents[1] / "config" / "model_routing.yaml"
+    routing = ModelRouter.from_yaml(config)._config
+
+    assert routing.providers["vtrix"].base_url == "https://cloud.vtrix.ai/llm/openai/v1"
+    assert routing.providers["vtrix"].api_key_env == "VTRIX_API_KEY"
+    for task in (
+        "writer_outline",
+        "writer_draft",
+        "writer_self_critic",
+        "article_judge",
+        "reflector",
+    ):
+        assert routing.tasks[task] == "vtrix/gpt-5.6-sol"

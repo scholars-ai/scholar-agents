@@ -15,6 +15,11 @@ providers:
     api_key_env: SF_API_KEY
     model_env: SILICONFLOW_MODEL
     json_mode: tool
+  vtrix:
+    protocol: openai
+    base_url: https://cloud.vtrix.ai/llm/openai/v1
+    api_key_env: VTRIX_API_KEY
+    model_env: VTRIX_MODEL
   # 需要时解注释即可接入其他 OpenAI 兼容端点：
   # kimi:
   #   protocol: openai
@@ -24,8 +29,8 @@ providers:
 tasks:
   topic_scout: siliconflow/deepseek-ai/DeepSeek-V3
   topic_judge: siliconflow/deepseek-ai/DeepSeek-V3
-  writer_outline: anthropic/claude-sonnet-5
-  writer_draft: anthropic/claude-sonnet-5
-  writer_self_critic: deepseek/deepseek-chat
-  article_judge: anthropic/claude-sonnet-5
-  reflector: anthropic/claude-opus-5
+  writer_outline: vtrix/gpt-5.6-sol
+  writer_draft: vtrix/gpt-5.6-sol
+  writer_self_critic: vtrix/gpt-5.6-sol
+  article_judge: vtrix/gpt-5.6-sol
+  reflector: vtrix/gpt-5.6-sol
