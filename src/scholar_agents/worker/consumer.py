@@ -18,9 +18,10 @@ import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
 from pydantic import ValidationError
-from scholar_contracts.models import ArticleWriteJob
+from scholar_contracts.models import ArticleEvaluateJob, ArticleWriteJob
 
 from scholar_agents import telemetry
+from scholar_agents.agents.article_judge import run_article_judge
 from scholar_agents.agents.judge import run_judge
 from scholar_agents.agents.scout import run_scout
 from scholar_agents.agents.writer import WriterModels, WriterProviders, run_writer
@@ -171,9 +172,6 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
         job = ArticleWriteJob.model_validate(payload)
     except ValidationError as exc:
         raise PermanentJobError(f"invalid article_write payload: {exc}") from exc
-    if job.rewrite is not None:
-        raise PermanentJobError("article rewrite jobs are not enabled in the first M2 slice")
-
     with telemetry.span(
         "article_write.process",
         **{"topic.id": str(job.topicId), "article.platform": job.platform.value},
@@ -218,6 +216,38 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
             WriterModels(outline=outline_model, draft=draft_model, critic=critic_model),
             AgentRepository(conn),
             recorder=trace,
+            rewrite=job.rewrite,
+        )
+
+
+@handler("article_evaluate")
+def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    try:
+        job = ArticleEvaluateJob.model_validate(payload)
+    except ValidationError as exc:
+        raise PermanentJobError(f"invalid article_evaluate payload: {exc}") from exc
+    with telemetry.span("article_evaluate.process", **{"article.id": str(job.articleId)}):
+        router = ModelRouter.from_yaml(_routing_config_path())
+        provider, model = router.resolve("article_judge")
+        trace = TraceRecorder(name="article-judge")
+        trace.trace(metadata={"jobType": "article.evaluate", "articleId": str(job.articleId)})
+        observed_provider = ObservedProvider(
+            provider,
+            trace,
+            observation_name="article-judge-structured",
+            prompt_version="article-judge@v1",
+        )
+        repository = AgentRepository(conn)
+        article = repository.get_article(job.articleId)
+        if article is None:
+            raise PermanentJobError(f"article {job.articleId} not found")
+        run_article_judge(
+            job.articleId,
+            observed_provider,
+            model,
+            repository,
+            _article_rubric_path(article.platform),
+            recorder=trace,
         )
 
 
@@ -227,6 +257,17 @@ def _routing_config_path() -> Path:
 
 def _rubric_path() -> Path:
     return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v2.yaml"
+
+
+def _article_rubric_path(platform: str) -> Path:
+    if platform not in {"xiaohongshu", "zhihu", "wechat"}:
+        raise PermanentJobError(f"unsupported article platform: {platform}")
+    return (
+        Path(__file__).resolve().parents[4]
+        / "scholar-shared"
+        / "rubrics"
+        / f"article-{platform}.v1.yaml"
+    )
 
 
 def _profiles_path() -> Path:

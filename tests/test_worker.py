@@ -12,8 +12,14 @@ from scholar_agents.worker.consumer import (
 )
 
 
-def test_m1_and_writer_handlers_are_registered() -> None:
-    assert {"source_fetch", "topic_scout", "topic_evaluate", "article_write"}.issubset(HANDLERS)
+def test_m1_and_m2_handlers_are_registered() -> None:
+    assert {
+        "source_fetch",
+        "topic_scout",
+        "topic_evaluate",
+        "article_write",
+        "article_evaluate",
+    }.issubset(HANDLERS)
 
 
 def test_manual_source_fetch_builds_targeted_scout_payload() -> None:

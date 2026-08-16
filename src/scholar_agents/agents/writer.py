@@ -8,13 +8,14 @@ from typing import Any, Protocol
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
-from scholar_contracts.models import Platform, PlatformProfile
+from scholar_contracts.models import Platform, PlatformProfile, RewriteContext
 
 from scholar_agents import telemetry
 from scholar_agents.db_access import (
     AgentRunInsert,
     AgentRunStatus,
     ArticleInsert,
+    ArticleRecord,
     ArticleReferenceRecord,
     InsightRecord,
     RawItemRecord,
@@ -57,6 +58,8 @@ class WriterRevision(WriterDraft):
 
 class WriterRepository(Protocol):
     def get_topic(self, topic_id: UUID) -> TopicRecord | None: ...
+
+    def get_article(self, article_id: UUID) -> ArticleRecord | None: ...
 
     def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]: ...
 
@@ -104,6 +107,7 @@ def run_writer(
     repository: WriterRepository,
     *,
     recorder: TraceRecorder,
+    rewrite: RewriteContext | None = None,
 ) -> WriterResult:
     topic = repository.get_topic(topic_id)
     if topic is None:
@@ -112,6 +116,22 @@ def run_writer(
         raise PermanentJobError(f"topic {topic_id} is not in writing state: {topic.status}")
     if platform.value not in topic.target_platforms:
         raise PermanentJobError(f"platform {platform.value} is not targeted by topic {topic_id}")
+
+    previous: ArticleRecord | None = None
+    version = 1
+    if rewrite is not None:
+        previous = repository.get_article(rewrite.previousArticleId)
+        if previous is None:
+            raise PermanentJobError(f"previous article {rewrite.previousArticleId} not found")
+        if previous.topic_id != topic.id or previous.platform != platform.value:
+            raise PermanentJobError("rewrite previous article does not match topic and platform")
+        if previous.status != "rewrite_queued":
+            raise PermanentJobError(
+                f"previous article {previous.id} is not rewrite_queued: {previous.status}"
+            )
+        if previous.version >= 3:
+            raise PermanentJobError("article rewrite limit already reached")
+        version = previous.version + 1
 
     with telemetry.span("writer.context.build", **{"topic.id": str(topic_id)}):
         raw_items = repository.list_topic_raw_items(topic)
@@ -142,23 +162,32 @@ def run_writer(
     usage = Usage()
     try:
         platform_instructions = profile_prompt(profile)
-        outline_data, outline_usage = complete_structured(
-            providers.outline,
-            models.outline,
-            "你是 Outliner，只设计文章的证据链和结构，不写正文。\n\n" + platform_instructions,
-            context,
-            outline_output_schema(raw_items),
-        )
-        _add_usage(usage, outline_usage)
-        outline = WriterOutline.model_validate(outline_data)
-        _validate_outline_evidence(outline, raw_items)
+        rewrite_context = _rewrite_prompt(previous, rewrite)
+        outline: WriterOutline | None = None
+        if rewrite is None or rewrite.redoOutline:
+            outline_data, outline_usage = complete_structured(
+                providers.outline,
+                models.outline,
+                "你是 Outliner，只设计文章的证据链和结构，不写正文。\n\n"
+                + platform_instructions,
+                context + rewrite_context,
+                outline_output_schema(raw_items),
+            )
+            _add_usage(usage, outline_usage)
+            outline = WriterOutline.model_validate(outline_data)
+            _validate_outline_evidence(outline, raw_items)
 
+        drafting_plan = (
+            f"写作大纲：\n{outline.model_dump_json(indent=2)}"
+            if outline is not None
+            else "保持上一版本的主体结构，只修复评审指出的问题，不重新设计大纲。"
+        )
         draft_data, draft_usage = complete_structured(
             providers.draft,
             models.draft,
             "你是 Drafter，严格依据素材、大纲和平台档案写成 Markdown。\n\n"
             + platform_instructions,
-            f"{context}\n\n写作大纲：\n{outline.model_dump_json(indent=2)}",
+            f"{context}{rewrite_context}\n\n{drafting_plan}",
             WriterDraft.model_json_schema(),
             max_tokens=8192,
         )
@@ -201,10 +230,11 @@ def run_writer(
             ArticleInsert(
                 topic_id=topic.id,
                 platform=platform.value,
-                version=1,
+                version=version,
                 title=formatted.title,
                 content_md=formatted.content_md,
                 writer_agent=writer_agent,
+                previous_article_id=previous.id if previous is not None else None,
             )
         )
         repository.update_agent_run(
@@ -291,6 +321,26 @@ def build_writer_context(
 
 同平台历史高分参考（只学习结构和表达，禁止复制事实）：
 {reference_text}
+"""
+
+
+def _rewrite_prompt(
+    previous: ArticleRecord | None, rewrite: RewriteContext | None
+) -> str:
+    if previous is None or rewrite is None:
+        return ""
+    return f"""
+
+这是第 {previous.version + 1} 版回炉任务。
+上一版本标题：{previous.title}
+上一版本正文：
+{previous.content_md}
+
+独立 ArticleJudge 的评审反馈：
+{rewrite.evaluationFeedback}
+
+是否重做大纲：{'是' if rewrite.redoOutline else '否'}
+必须针对反馈修订，不能仅做同义改写。
 """
 
 

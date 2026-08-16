@@ -5,10 +5,10 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from scholar_contracts.models import Platform
+from scholar_contracts.models import Platform, RewriteContext
 
 from scholar_agents.agents.writer import WriterModels, WriterProviders, run_writer
-from scholar_agents.db_access import AgentRunInsert, ArticleInsert, TopicRecord
+from scholar_agents.db_access import AgentRunInsert, ArticleInsert, ArticleRecord, TopicRecord
 from scholar_agents.observability import TraceRecorder
 from scholar_agents.providers.base import ChatResponse, TextBlock, Usage
 from scholar_agents.writing.formatter import WriterConstraintError, format_article
@@ -35,8 +35,9 @@ class FakeProvider:
 
 
 class FakeRepository:
-    def __init__(self, topic: TopicRecord) -> None:
+    def __init__(self, topic: TopicRecord, previous: ArticleRecord | None = None) -> None:
         self.topic = topic
+        self.previous = previous
         self.run_id = uuid4()
         self.article_id = uuid4()
         self.article: ArticleInsert | None = None
@@ -44,6 +45,11 @@ class FakeRepository:
 
     def get_topic(self, _topic_id: UUID) -> TopicRecord:
         return self.topic
+
+    def get_article(self, article_id: UUID) -> ArticleRecord | None:
+        if self.previous is not None and article_id == self.previous.id:
+            return self.previous
+        return None
 
     def list_topic_raw_items(self, _topic: TopicRecord) -> list[object]:
         return []
@@ -136,3 +142,62 @@ def test_writer_runs_outline_draft_critic_and_persists_draft() -> None:
     assert repository.article.version == 1
     assert repository.run_updates[-1].status == "succeeded"
     assert outline.calls == draft.calls == critic.calls == 1
+
+
+def test_writer_rewrite_creates_new_version_without_mutating_previous() -> None:
+    topic_id = uuid4()
+    topic = TopicRecord(
+        topic_id,
+        "可观测 AI 流水线",
+        "修复结构问题",
+        "根据独立评分意见回炉。",
+        [],
+        ["xiaohongshu"],
+        "written",
+        82.0,
+    )
+    previous = ArticleRecord(
+        uuid4(),
+        topic_id,
+        "xiaohongshu",
+        1,
+        "旧标题",
+        "旧正文",
+        "writer-v1",
+        "rewrite_queued",
+        62.0,
+        None,
+    )
+    outline = FakeProvider({})
+    content = "这是针对评审意见修订后的可执行工程说明。" * 42 + "\n#人工智能 #工程实践 #可观测性"
+    draft = FakeProvider({"title": "修订后的工程链路", "contentMarkdown": content})
+    critic = FakeProvider(
+        {
+            "title": "修订后的工程链路",
+            "contentMarkdown": content,
+            "changes": ["修复评审短板"],
+        }
+    )
+    repository = FakeRepository(topic, previous)
+
+    run_writer(
+        topic_id,
+        Platform.xiaohongshu,
+        load_platform_profile(PROFILES, Platform.xiaohongshu),
+        WriterProviders(outline=outline, draft=draft, critic=critic),
+        WriterModels(outline="outline-model", draft="draft-model", critic="critic-model"),
+        repository,  # type: ignore[arg-type]
+        recorder=TraceRecorder(name="writer-rewrite-test"),
+        rewrite=RewriteContext(
+            previousArticleId=previous.id,
+            evaluationFeedback="结构已经可用，只需修复具体表达和信息密度。",
+            redoOutline=False,
+        ),
+    )
+
+    assert repository.article is not None
+    assert repository.article.version == 2
+    assert repository.article.previous_article_id == previous.id
+    assert previous.status == "rewrite_queued"
+    assert outline.calls == 0
+    assert draft.calls == critic.calls == 1

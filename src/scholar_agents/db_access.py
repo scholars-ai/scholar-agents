@@ -165,6 +165,22 @@ class TopicEvaluationInsert:
 
 
 @dataclass(frozen=True, slots=True)
+class ArticleEvaluationInsert:
+    article_id: UUID
+    rubric_version: str
+    dimension_scores: dict[str, float]
+    dimension_reasons: dict[str, str]
+    total_score: float
+    rationale: str
+    judge_model: str
+    agent_run_id: UUID | None
+    weight_version: int
+    vetoed_dimension: str | None
+    pass_threshold: float
+    passed: bool
+
+
+@dataclass(frozen=True, slots=True)
 class InsightRecord:
     content: str
     evidence: dict[str, Any]
@@ -179,6 +195,39 @@ class ArticleReferenceRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class ArticleRecord:
+    id: UUID
+    topic_id: UUID
+    platform: str
+    version: int
+    title: str
+    content_md: str
+    writer_agent: str
+    status: str
+    latest_score: float | None
+    previous_article_id: UUID | None
+
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> ArticleRecord:
+        return cls(
+            id=_uuid(row["id"]),
+            topic_id=_uuid(row["topic_id"]),
+            platform=str(row["platform"]),
+            version=int(row["version"]),
+            title=str(row["title"]),
+            content_md=str(row["content_md"]),
+            writer_agent=str(row["writer_agent"]),
+            status=str(row["status"]),
+            latest_score=_optional_float(row.get("latest_score")),
+            previous_article_id=(
+                _uuid(row["previous_article_id"])
+                if row.get("previous_article_id") is not None
+                else None
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ArticleInsert:
     topic_id: UUID
     platform: str
@@ -186,6 +235,7 @@ class ArticleInsert:
     title: str
     content_md: str
     writer_agent: str
+    previous_article_id: UUID | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +297,20 @@ class AgentRepository:
             )
             row = cur.fetchone()
         return None if row is None else TopicRecord.from_row(row)
+
+    def get_article(self, article_id: UUID) -> ArticleRecord | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select id, topic_id, platform, version, title, content_md,
+                       writer_agent, status, latest_score, previous_article_id
+                from articles
+                where id = %s
+                """,
+                (article_id,),
+            )
+            row = cur.fetchone()
+        return None if row is None else ArticleRecord.from_row(row)
 
     def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]:
         if not topic.raw_item_ids:
@@ -495,8 +559,8 @@ class AgentRepository:
                 """
                 insert into articles
                     (topic_id, platform, version, format, title, content_md,
-                     assets, writer_agent, status)
-                values (%s, %s::platform, %s, 'markdown', %s, %s, '[]'::jsonb, %s, 'draft')
+                     assets, writer_agent, status, previous_article_id)
+                values (%s, %s::platform, %s, 'markdown', %s, %s, '[]'::jsonb, %s, 'draft', %s)
                 on conflict (topic_id, platform, version) do nothing
                 returning id
                 """,
@@ -507,6 +571,7 @@ class AgentRepository:
                     article.title,
                     article.content_md,
                     article.writer_agent,
+                    article.previous_article_id,
                 ),
             )
             row = cur.fetchone()
@@ -521,4 +586,35 @@ class AgentRepository:
                 row = cur.fetchone()
         if row is None:
             raise RuntimeError("create article returned no id")
+        return _uuid(row["id"])
+
+    def create_article_evaluation(self, evaluation: ArticleEvaluationInsert) -> UUID:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into article_evaluations
+                    (article_id, rubric_version, dimension_scores, dimension_reasons,
+                     total_score, rationale, judge_model, agent_run_id, weight_version,
+                     vetoed_dimension, pass_threshold, passed)
+                values (%s, %s, %s::jsonb, %s::jsonb, %s, %s, %s, %s, %s, %s, %s, %s)
+                returning id
+                """,
+                (
+                    evaluation.article_id,
+                    evaluation.rubric_version,
+                    json.dumps(evaluation.dimension_scores, ensure_ascii=False),
+                    json.dumps(evaluation.dimension_reasons, ensure_ascii=False),
+                    evaluation.total_score,
+                    evaluation.rationale,
+                    evaluation.judge_model,
+                    evaluation.agent_run_id,
+                    evaluation.weight_version,
+                    evaluation.vetoed_dimension,
+                    evaluation.pass_threshold,
+                    evaluation.passed,
+                ),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("create article evaluation returned no id")
         return _uuid(row["id"])
