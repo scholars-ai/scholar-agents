@@ -15,7 +15,7 @@ from uuid import UUID
 from scholar_contracts.models import TopicDraft, TopicScoutOutput
 
 from scholar_agents import telemetry
-from scholar_agents.db_access import AgentRunInsert, RawItemRecord
+from scholar_agents.db_access import AgentRunInsert, InsightRecord, RawItemRecord
 from scholar_agents.embedding import cosine
 from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
@@ -28,6 +28,10 @@ class ScoutOutputError(ValueError):
 
 
 class ScoutRepository(Protocol):
+    def list_topic_insights(
+        self, embedding: list[float] | None = None, limit: int = 5
+    ) -> list[InsightRecord]: ...
+
     def find_similar_topic(
         self, embedding: list[float], threshold: float = 0.92
     ) -> tuple[UUID, float] | None: ...
@@ -112,7 +116,12 @@ def format_cluster_context(items: list[RawItemRecord]) -> str:
     return "\n\n---\n\n".join(sections)
 
 
-def build_scout_prompt(items: list[RawItemRecord], *, targeted: bool = False) -> tuple[str, str]:
+def build_scout_prompt(
+    items: list[RawItemRecord],
+    *,
+    targeted: bool = False,
+    insights: list[InsightRecord] | None = None,
+) -> tuple[str, str]:
     """构造 TopicScout 的系统提示和素材上下文。"""
     system = """你是 TopicScout，负责把资讯素材聚合成可创作的选题。
 
@@ -128,6 +137,14 @@ def build_scout_prompt(items: list[RawItemRecord], *, targeted: bool = False) ->
 
 当前是定向手动投喂模式。即使输入只有一篇素材，也必须输出 1 个可写选题；
 不要因为缺少其他报道而输出空 topics。选题只能基于这篇素材，不得虚构未提供的事实。"""
+    memory = "\n".join(
+        f"- {item.content}（confidence={item.confidence:.2f}）" for item in insights or []
+    ) or "无"
+    system += f"""
+
+以下是由真实发布数据支持的已生效经验。它们是选角度的参考，不是事实来源；
+若与当前素材冲突，以当前素材为准：
+{memory}"""
     allowed_ids = "、".join(str(item.id) for item in items)
     user = (
         f"请分析以下素材簇。rawItemIds 只能从这个列表中选择：{allowed_ids}\n\n"
@@ -190,7 +207,9 @@ def run_scout(
             if max_topics is not None and created_topics >= max_topics:
                 break
             clusters_processed += 1
-            system, user = build_scout_prompt(cluster, targeted=targeted)
+            insight_embedding = _cluster_embedding(cluster)
+            insights = repository.list_topic_insights(insight_embedding)
+            system, user = build_scout_prompt(cluster, targeted=targeted, insights=insights)
             data, usage = complete_structured(
                 provider,
                 model,
@@ -282,3 +301,14 @@ def _default_embed(text: str) -> list[float]:
     from scholar_agents.embedding import embed
 
     return embed(text)
+
+
+def _cluster_embedding(items: list[RawItemRecord]) -> list[float] | None:
+    vectors = [item.embedding for item in items if item.embedding]
+    if not vectors:
+        return None
+    size = len(vectors[0])
+    compatible = [vector for vector in vectors if len(vector) == size]
+    if not compatible:
+        return None
+    return [sum(vector[index] for vector in compatible) / len(compatible) for index in range(size)]

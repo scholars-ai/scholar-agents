@@ -54,7 +54,9 @@ class FakeRepository:
     def list_topic_raw_items(self, _topic: TopicRecord) -> list[object]:
         return []
 
-    def list_writing_insights(self, _platform: str, limit: int = 5) -> list[object]:
+    def list_writing_insights(
+        self, _platform: str, _embedding: list[float] | None = None, limit: int = 5
+    ) -> list[object]:
         return []
 
     def list_high_score_articles(self, _platform: str, limit: int = 3) -> list[object]:

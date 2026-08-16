@@ -111,6 +111,7 @@ class TopicRecord:
     target_platforms: list[str]
     status: str
     latest_score: float | None
+    embedding: list[float] | None = None
     correlation_id: UUID | None = None
 
     @classmethod
@@ -124,6 +125,7 @@ class TopicRecord:
             target_platforms=_string_list(row.get("target_platforms")),
             status=str(row["status"]),
             latest_score=_optional_float(row.get("latest_score")),
+            embedding=_embedding(row.get("embedding")),
             correlation_id=(
                 _uuid(row["correlation_id"]) if row.get("correlation_id") is not None else None
             ),
@@ -182,9 +184,35 @@ class ArticleEvaluationInsert:
 
 @dataclass(frozen=True, slots=True)
 class InsightRecord:
+    id: UUID | None
     content: str
-    evidence: dict[str, Any]
+    evidence: list[dict[str, Any]]
     confidence: float
+    kind: str | None = None
+    platform: str | None = None
+    status: str | None = None
+    manual_status_override: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class PerformanceSampleRecord:
+    publication_id: UUID
+    article_id: UUID
+    platform: str
+    snapshot_window: str
+    captured_at: datetime
+    performance_raw: float
+    performance_percentile: float | None
+    article_title: str
+    article_content: str
+    article_score: float | None
+    article_dimensions: dict[str, float]
+    topic_id: UUID
+    topic_title: str
+    topic_angle: str
+    topic_score: float | None
+    topic_dimensions: dict[str, float]
+    metrics: dict[str, int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +281,64 @@ class AgentRunInsert:
     correlation_id: UUID | None = None
 
 
+def _json_object(value: object) -> dict[str, Any]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    return value if isinstance(value, dict) else {}
+
+
+def _json_array(value: object) -> list[dict[str, Any]]:
+    if isinstance(value, str):
+        value = json.loads(value)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _insight_record(row: dict[str, Any]) -> InsightRecord:
+    return InsightRecord(
+        id=_uuid(row["id"]),
+        content=str(row["content"]),
+        evidence=_json_array(row.get("evidence")),
+        confidence=float(row["confidence"]),
+        kind=str(row["kind"]) if row.get("kind") is not None else None,
+        platform=str(row["platform"]) if row.get("platform") is not None else None,
+        status=str(row["status"]) if row.get("status") is not None else None,
+        manual_status_override=bool(row.get("manual_status_override")),
+    )
+
+
+def _performance_sample(row: dict[str, Any]) -> PerformanceSampleRecord:
+    return PerformanceSampleRecord(
+        publication_id=_uuid(row["publication_id"]),
+        article_id=_uuid(row["article_id"]),
+        platform=str(row["platform"]),
+        snapshot_window=str(row["snapshot_window"]),
+        captured_at=row["captured_at"],
+        performance_raw=float(row["performance_raw"]),
+        performance_percentile=_optional_float(row.get("performance_percentile")),
+        article_title=str(row["article_title"]),
+        article_content=str(row["content_md"]),
+        article_score=_optional_float(row.get("article_score")),
+        article_dimensions={
+            str(key): float(value)
+            for key, value in _json_object(row.get("article_dimensions")).items()
+        },
+        topic_id=_uuid(row["topic_id"]),
+        topic_title=str(row["topic_title"]),
+        topic_angle=str(row["topic_angle"]),
+        topic_score=_optional_float(row.get("topic_score")),
+        topic_dimensions={
+            str(key): float(value)
+            for key, value in _json_object(row.get("topic_dimensions")).items()
+        },
+        metrics={
+            str(key): int(value) if value is not None else None
+            for key, value in _json_object(row.get("metrics")).items()
+        },
+    )
+
+
 class AgentRepository:
     """SQL 访问薄层；不负责 commit/rollback。"""
 
@@ -289,7 +375,7 @@ class AgentRepository:
             cur.execute(
                 """
                 select id, title, angle, summary, raw_item_ids, target_platforms,
-                       status, latest_score, correlation_id
+                       status, latest_score, embedding, correlation_id
                 from topics
                 where id = %s
                 """,
@@ -330,34 +416,209 @@ class AgentRepository:
             rows = cur.fetchall()
         return [RawItemRecord.from_row(row) for row in rows]
 
-    def list_writing_insights(self, platform: str, limit: int = 5) -> list[InsightRecord]:
+    def list_writing_insights(
+        self, platform: str, embedding: list[float] | None = None, limit: int = 5
+    ) -> list[InsightRecord]:
+        vector = to_pgvector(embedding) if embedding else None
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                select content, evidence, confidence
+                select id, content, evidence, confidence, kind::text, platform::text,
+                       status::text, manual_status_override
                 from insights
                 where status = 'active'
                   and kind in ('writing_lesson', 'platform_lesson')
                   and (platform is null or platform = %s::platform)
-                order by confidence desc, updated_at desc
+                order by
+                  case when %s::vector is not null and embedding is not null
+                       then (1 - (embedding <=> %s::vector)) * confidence
+                            * exp(-extract(epoch from (now() - updated_at)) / 15552000.0)
+                       else confidence * exp(-extract(epoch from (now() - updated_at)) / 15552000.0)
+                  end desc,
+                  updated_at desc
                 limit %s
                 """,
-                (platform, limit),
+                (platform, vector, vector, limit),
             )
             rows = cur.fetchall()
-        records: list[InsightRecord] = []
-        for row in rows:
-            evidence = row.get("evidence") or {}
-            if isinstance(evidence, str):
-                evidence = json.loads(evidence)
-            records.append(
-                InsightRecord(
-                    content=str(row["content"]),
-                    evidence=evidence if isinstance(evidence, dict) else {},
-                    confidence=float(row["confidence"]),
-                )
+        return [_insight_record(row) for row in rows]
+
+    def list_topic_insights(
+        self, embedding: list[float] | None = None, limit: int = 5
+    ) -> list[InsightRecord]:
+        vector = to_pgvector(embedding) if embedding else None
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select id, content, evidence, confidence, kind::text, platform::text,
+                       status::text, manual_status_override
+                from insights
+                where status = 'active' and kind in ('topic_lesson', 'source_lesson')
+                order by
+                  case when %s::vector is not null and embedding is not null
+                       then (1 - (embedding <=> %s::vector)) * confidence
+                            * exp(-extract(epoch from (now() - updated_at)) / 15552000.0)
+                       else confidence * exp(-extract(epoch from (now() - updated_at)) / 15552000.0)
+                  end desc,
+                  updated_at desc
+                limit %s
+                """,
+                (vector, vector, limit),
             )
-        return records
+            rows = cur.fetchall()
+        return [_insight_record(row) for row in rows]
+
+    def list_reflection_samples(
+        self, period_start: datetime, period_end: datetime
+    ) -> list[PerformanceSampleRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select p.id as publication_id, a.id as article_id, p.platform::text,
+                       ms.snapshot_window::text, ms.captured_at, ms.performance_raw,
+                       ms.performance_percentile, ms.metrics,
+                       a.title as article_title, a.content_md, a.latest_score as article_score,
+                       coalesce(ae.dimension_scores, '{}'::jsonb) as article_dimensions,
+                       t.id as topic_id, t.title as topic_title, t.angle as topic_angle,
+                       t.latest_score as topic_score,
+                       coalesce(te.dimension_scores, '{}'::jsonb) as topic_dimensions
+                from metric_snapshots ms
+                join publications p on p.id = ms.publication_id
+                join articles a on a.id = p.article_id
+                join topics t on t.id = a.topic_id
+                left join lateral (
+                    select dimension_scores from article_evaluations
+                    where article_id = a.id order by created_at desc limit 1
+                ) ae on true
+                left join lateral (
+                    select dimension_scores from topic_evaluations
+                    where topic_id = t.id order by created_at desc limit 1
+                ) te on true
+                where ms.captured_at >= %s and ms.captured_at < %s
+                  and ms.snapshot_window <> 'custom'
+                  and ms.performance_percentile is not null
+                order by ms.captured_at, p.id
+                """,
+                (period_start, period_end),
+            )
+            rows = cur.fetchall()
+        return [_performance_sample(row) for row in rows]
+
+    def list_reflection_insights(self, limit: int = 100) -> list[InsightRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select id, content, evidence, confidence, kind::text, platform::text,
+                       status::text, manual_status_override
+                from insights
+                order by updated_at desc limit %s
+                """,
+                (limit,),
+            )
+            rows = cur.fetchall()
+        return [_insight_record(row) for row in rows]
+
+    def create_insight(
+        self,
+        *,
+        kind: str,
+        platform: str | None,
+        content: str,
+        evidence: list[dict[str, Any]],
+        confidence: float,
+        status: str,
+        embedding: list[float],
+    ) -> UUID:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into insights (
+                    kind, platform, content, evidence, confidence, status, embedding
+                ) values (
+                    %s::insight_kind, %s::platform, %s, %s::jsonb,
+                    %s, %s::insight_status, %s::vector
+                )
+                returning id
+                """,
+                (
+                    kind,
+                    platform,
+                    content,
+                    json.dumps(evidence),
+                    confidence,
+                    status,
+                    to_pgvector(embedding),
+                ),
+            )
+            row = cur.fetchone()
+        assert row is not None
+        return _uuid(row["id"])
+
+    def update_insight_from_reflection(
+        self,
+        insight_id: UUID,
+        *,
+        evidence: list[dict[str, Any]],
+        confidence: float,
+        status: str,
+    ) -> bool:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                update insights
+                set evidence = %s::jsonb,
+                    confidence = %s,
+                    status = case
+                        when manual_status_override then status
+                        else %s::insight_status
+                    end,
+                    updated_at = now()
+                where id = %s
+                returning id
+                """,
+                (json.dumps(evidence), confidence, status, insight_id),
+            )
+            return cur.fetchone() is not None
+
+    def create_weekly_report(
+        self,
+        *,
+        period_start: datetime,
+        period_end: datetime,
+        sample_count: int,
+        summary_markdown: str,
+        calibration: dict[str, Any],
+        agent_run_id: UUID,
+    ) -> UUID:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into weekly_reports (
+                    period_start, period_end, sample_count,
+                    summary_markdown, calibration, agent_run_id
+                ) values (%s, %s, %s, %s, %s::jsonb, %s)
+                on conflict (period_start, period_end) do nothing
+                returning id
+                """,
+                (
+                    period_start,
+                    period_end,
+                    sample_count,
+                    summary_markdown,
+                    json.dumps(calibration),
+                    agent_run_id,
+                ),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return _uuid(row["id"])
+            cur.execute(
+                "select id from weekly_reports where period_start=%s and period_end=%s",
+                (period_start, period_end),
+            )
+            existing = cur.fetchone()
+        assert existing is not None
+        return _uuid(existing["id"])
 
     def list_high_score_articles(
         self, platform: str, limit: int = 3

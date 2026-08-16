@@ -18,6 +18,7 @@ def test_m1_and_m2_handlers_are_registered() -> None:
         "topic_scout",
         "topic_evaluate",
         "article_write",
+        "memory_reflect",
         "article_evaluate",
     }.issubset(HANDLERS)
 

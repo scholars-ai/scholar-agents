@@ -199,6 +199,12 @@ class FakeRepository:
         self.clustered: list[object] = []
         self.runs: list[object] = []
 
+    def list_topic_insights(
+        self, embedding: list[float] | None = None, limit: int = 5
+    ) -> list[object]:
+        del embedding, limit
+        return []
+
     def find_similar_topic(self, embedding: list[float], threshold: float = 0.92) -> object:
         del embedding, threshold
         return None

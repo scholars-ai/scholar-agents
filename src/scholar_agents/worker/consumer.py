@@ -18,11 +18,12 @@ import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
 from pydantic import ValidationError
-from scholar_contracts.models import ArticleEvaluateJob, ArticleWriteJob
+from scholar_contracts.models import ArticleEvaluateJob, ArticleWriteJob, MemoryReflectJob
 
 from scholar_agents import telemetry
 from scholar_agents.agents.article_judge import run_article_judge
 from scholar_agents.agents.judge import run_judge
+from scholar_agents.agents.reflector import run_reflector
 from scholar_agents.agents.scout import run_scout
 from scholar_agents.agents.writer import WriterModels, WriterProviders, run_writer
 from scholar_agents.db_access import AgentRepository
@@ -247,6 +248,45 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> N
             model,
             repository,
             _article_rubric_path(article.platform),
+            recorder=trace,
+        )
+
+
+@handler("memory_reflect")
+def handle_memory_reflect(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    try:
+        job = MemoryReflectJob.model_validate(payload)
+    except ValidationError as exc:
+        raise PermanentJobError(f"invalid memory_reflect payload: {exc}") from exc
+    with telemetry.span(
+        "memory_reflect.process",
+        **{
+            "memory.period_start": job.periodStart.isoformat(),
+            "memory.period_end": job.periodEnd.isoformat(),
+        },
+    ):
+        router = ModelRouter.from_yaml(_routing_config_path())
+        provider, model = router.resolve("reflector")
+        trace = TraceRecorder(name="memory-reflector")
+        trace.trace(
+            metadata={
+                "jobType": "memory.reflect",
+                "periodStart": job.periodStart.isoformat(),
+                "periodEnd": job.periodEnd.isoformat(),
+            }
+        )
+        observed = ObservedProvider(
+            provider,
+            trace,
+            observation_name="memory-reflector-structured",
+            prompt_version="memory-reflector@v1",
+        )
+        run_reflector(
+            job.periodStart,
+            job.periodEnd,
+            observed,
+            model,
+            AgentRepository(conn),
             recorder=trace,
         )
 

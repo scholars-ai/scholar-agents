@@ -63,7 +63,9 @@ class WriterRepository(Protocol):
 
     def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]: ...
 
-    def list_writing_insights(self, platform: str, limit: int = 5) -> list[InsightRecord]: ...
+    def list_writing_insights(
+        self, platform: str, embedding: list[float] | None = None, limit: int = 5
+    ) -> list[InsightRecord]: ...
 
     def list_high_score_articles(
         self, platform: str, limit: int = 3
@@ -138,7 +140,7 @@ def run_writer(
         context = build_writer_context(
             topic,
             raw_items,
-            repository.list_writing_insights(platform.value),
+            repository.list_writing_insights(platform.value, topic.embedding),
             repository.list_high_score_articles(platform.value),
         )
     writer_agent = (
