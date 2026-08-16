@@ -98,6 +98,23 @@ def test_topic_record_builds_judge_context_from_joined_row() -> None:
     assert topic.status == "candidate"
 
 
+def test_topic_record_parses_unregistered_postgres_enum_array() -> None:
+    topic = TopicRecord.from_row(
+        {
+            "id": uuid4(),
+            "title": "三平台选题",
+            "angle": "角度",
+            "summary": "摘要",
+            "raw_item_ids": [],
+            "target_platforms": "{xiaohongshu,zhihu,wechat}",
+            "status": "in_writing",
+            "latest_score": 80,
+        }
+    )
+
+    assert topic.target_platforms == ["xiaohongshu", "zhihu", "wechat"]
+
+
 def test_weight_set_record_parses_json_weights() -> None:
     record = WeightSetRecord.from_row(
         {"version": 3, "weights": {"timeliness": 0.2}, "rubric_id": "topic"}

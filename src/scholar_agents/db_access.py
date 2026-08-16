@@ -56,6 +56,22 @@ def _embedding(value: object) -> list[float] | None:
     raise TypeError(f"unsupported embedding value: {type(value).__name__}")
 
 
+def _string_list(value: object) -> list[str]:
+    """兼容 psycopg 对已知数组和未注册自定义 enum[] 的两种返回形态。"""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if raw.startswith("{") and raw.endswith("}"):
+            raw = raw[1:-1]
+        if not raw:
+            return []
+        return [item.strip().strip('"') for item in raw.split(",") if item.strip()]
+    if isinstance(value, (list, tuple)):
+        return [str(item) for item in value]
+    raise TypeError(f"unsupported string array value: {type(value).__name__}")
+
+
 @dataclass(frozen=True, slots=True)
 class RawItemRecord:
     id: UUID
@@ -105,7 +121,7 @@ class TopicRecord:
             angle=str(row["angle"]),
             summary=str(row["summary"]),
             raw_item_ids=[_uuid(value) for value in row.get("raw_item_ids") or []],
-            target_platforms=[str(value) for value in row.get("target_platforms") or []],
+            target_platforms=_string_list(row.get("target_platforms")),
             status=str(row["status"]),
             latest_score=_optional_float(row.get("latest_score")),
             correlation_id=(
@@ -146,6 +162,30 @@ class TopicEvaluationInsert:
     weight_version: int | None
     vetoed_dimension: str | None
     dimension_reasons: dict[str, str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class InsightRecord:
+    content: str
+    evidence: dict[str, Any]
+    confidence: float
+
+
+@dataclass(frozen=True, slots=True)
+class ArticleReferenceRecord:
+    title: str
+    content_md: str
+    latest_score: float
+
+
+@dataclass(frozen=True, slots=True)
+class ArticleInsert:
+    topic_id: UUID
+    platform: str
+    version: int
+    title: str
+    content_md: str
+    writer_agent: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -225,6 +265,60 @@ class AgentRepository:
             )
             rows = cur.fetchall()
         return [RawItemRecord.from_row(row) for row in rows]
+
+    def list_writing_insights(self, platform: str, limit: int = 5) -> list[InsightRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select content, evidence, confidence
+                from insights
+                where status = 'active'
+                  and kind in ('writing_lesson', 'platform_lesson')
+                  and (platform is null or platform = %s::platform)
+                order by confidence desc, updated_at desc
+                limit %s
+                """,
+                (platform, limit),
+            )
+            rows = cur.fetchall()
+        records: list[InsightRecord] = []
+        for row in rows:
+            evidence = row.get("evidence") or {}
+            if isinstance(evidence, str):
+                evidence = json.loads(evidence)
+            records.append(
+                InsightRecord(
+                    content=str(row["content"]),
+                    evidence=evidence if isinstance(evidence, dict) else {},
+                    confidence=float(row["confidence"]),
+                )
+            )
+        return records
+
+    def list_high_score_articles(
+        self, platform: str, limit: int = 3
+    ) -> list[ArticleReferenceRecord]:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select title, content_md, latest_score
+                from articles
+                where platform = %s::platform and latest_score is not null
+                  and status in ('scored', 'pending_review', 'approved', 'published')
+                order by latest_score desc, updated_at desc
+                limit %s
+                """,
+                (platform, limit),
+            )
+            rows = cur.fetchall()
+        return [
+            ArticleReferenceRecord(
+                title=str(row["title"]),
+                content_md=str(row["content_md"]),
+                latest_score=float(row["latest_score"]),
+            )
+            for row in rows
+        ]
 
     def get_active_weight_set(self, rubric_id: str) -> WeightSetRecord | None:
         with self._conn.cursor() as cur:
@@ -392,4 +486,39 @@ class AgentRepository:
             row = cur.fetchone()
         if row is None:
             raise RuntimeError("create topic evaluation returned no id")
+        return _uuid(row["id"])
+
+    def create_article(self, article: ArticleInsert) -> UUID:
+        """写入 Agent 结果；唯一键保证同一 topic/platform/version 幂等。"""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                insert into articles
+                    (topic_id, platform, version, format, title, content_md,
+                     assets, writer_agent, status)
+                values (%s, %s::platform, %s, 'markdown', %s, %s, '[]'::jsonb, %s, 'draft')
+                on conflict (topic_id, platform, version) do nothing
+                returning id
+                """,
+                (
+                    article.topic_id,
+                    article.platform,
+                    article.version,
+                    article.title,
+                    article.content_md,
+                    article.writer_agent,
+                ),
+            )
+            row = cur.fetchone()
+            if row is None:
+                cur.execute(
+                    """
+                    select id from articles
+                    where topic_id = %s and platform = %s::platform and version = %s
+                    """,
+                    (article.topic_id, article.platform, article.version),
+                )
+                row = cur.fetchone()
+        if row is None:
+            raise RuntimeError("create article returned no id")
         return _uuid(row["id"])

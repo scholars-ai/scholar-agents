@@ -1,0 +1,344 @@
+"""M2 WriterOrchestrator：共享流水线骨架，平台差异由 Profile 注入。"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any, Protocol
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field
+from scholar_contracts.models import Platform, PlatformProfile
+
+from scholar_agents import telemetry
+from scholar_agents.db_access import (
+    AgentRunInsert,
+    AgentRunStatus,
+    ArticleInsert,
+    ArticleReferenceRecord,
+    InsightRecord,
+    RawItemRecord,
+    TopicRecord,
+)
+from scholar_agents.errors import PermanentJobError
+from scholar_agents.observability import TraceRecorder
+from scholar_agents.providers.base import ModelProvider, Usage
+from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
+from scholar_agents.writing.formatter import FormattedArticle, WriterConstraintError, format_article
+from scholar_agents.writing.profiles import profile_prompt
+
+PROMPT_VERSION = "writer-orchestrator@v1"
+MAX_MATERIAL_CHARACTERS = 20_000
+MAX_REFERENCE_CHARACTERS = 4_000
+
+
+class OutlineSection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    heading: str = Field(min_length=1)
+    purpose: str = Field(min_length=1)
+    evidenceRawItemIds: list[UUID]
+
+
+class WriterOutline(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1)
+    sections: list[OutlineSection] = Field(min_length=3, max_length=7)
+
+
+class WriterDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1)
+    contentMarkdown: str = Field(min_length=1)
+
+
+class WriterRevision(WriterDraft):
+    changes: list[str]
+
+
+class WriterRepository(Protocol):
+    def get_topic(self, topic_id: UUID) -> TopicRecord | None: ...
+
+    def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]: ...
+
+    def list_writing_insights(self, platform: str, limit: int = 5) -> list[InsightRecord]: ...
+
+    def list_high_score_articles(
+        self, platform: str, limit: int = 3
+    ) -> list[ArticleReferenceRecord]: ...
+
+    def create_agent_run(self, run: AgentRunInsert) -> UUID: ...
+
+    def update_agent_run(self, run_id: UUID, run: AgentRunInsert) -> None: ...
+
+    def create_article(self, article: ArticleInsert) -> UUID: ...
+
+
+@dataclass(frozen=True, slots=True)
+class WriterModels:
+    outline: str
+    draft: str
+    critic: str
+
+
+@dataclass(frozen=True, slots=True)
+class WriterProviders:
+    outline: ModelProvider
+    draft: ModelProvider
+    critic: ModelProvider
+
+
+@dataclass(frozen=True, slots=True)
+class WriterResult:
+    article_id: UUID
+    agent_run_id: UUID
+    usage: Usage
+    formatted: FormattedArticle
+
+
+def run_writer(
+    topic_id: UUID,
+    platform: Platform,
+    profile: PlatformProfile,
+    providers: WriterProviders,
+    models: WriterModels,
+    repository: WriterRepository,
+    *,
+    recorder: TraceRecorder,
+) -> WriterResult:
+    topic = repository.get_topic(topic_id)
+    if topic is None:
+        raise PermanentJobError(f"topic {topic_id} not found")
+    if topic.status not in {"in_writing", "written"}:
+        raise PermanentJobError(f"topic {topic_id} is not in writing state: {topic.status}")
+    if platform.value not in topic.target_platforms:
+        raise PermanentJobError(f"platform {platform.value} is not targeted by topic {topic_id}")
+
+    with telemetry.span("writer.context.build", **{"topic.id": str(topic_id)}):
+        raw_items = repository.list_topic_raw_items(topic)
+        context = build_writer_context(
+            topic,
+            raw_items,
+            repository.list_writing_insights(platform.value),
+            repository.list_high_score_articles(platform.value),
+        )
+    writer_agent = (
+        f"{PROMPT_VERSION};profile={profile.id}@{profile.version};"
+        f"outline={models.outline};draft={models.draft};critic={models.critic}"
+    )
+    run_id = repository.create_agent_run(
+        AgentRunInsert(
+            job_type="article.write",
+            entity_type="topic",
+            entity_id=topic.id,
+            model=writer_agent,
+            prompt_version=PROMPT_VERSION,
+            tokens_in=0,
+            tokens_out=0,
+            cost_usd=None,
+            langfuse_trace_id=recorder.trace_id,
+            status="running",
+        )
+    )
+    usage = Usage()
+    try:
+        platform_instructions = profile_prompt(profile)
+        outline_data, outline_usage = complete_structured(
+            providers.outline,
+            models.outline,
+            "你是 Outliner，只设计文章的证据链和结构，不写正文。\n\n" + platform_instructions,
+            context,
+            outline_output_schema(raw_items),
+        )
+        _add_usage(usage, outline_usage)
+        outline = WriterOutline.model_validate(outline_data)
+        _validate_outline_evidence(outline, raw_items)
+
+        draft_data, draft_usage = complete_structured(
+            providers.draft,
+            models.draft,
+            "你是 Drafter，严格依据素材、大纲和平台档案写成 Markdown。\n\n"
+            + platform_instructions,
+            f"{context}\n\n写作大纲：\n{outline.model_dump_json(indent=2)}",
+            WriterDraft.model_json_schema(),
+            max_tokens=8192,
+        )
+        _add_usage(usage, draft_usage)
+        draft = WriterDraft.model_validate(draft_data)
+
+        revision = _critic_revision(
+            providers.critic,
+            models.critic,
+            platform_instructions,
+            context,
+            draft,
+            usage,
+        )
+        try:
+            formatted = format_article(revision.title, revision.contentMarkdown, profile)
+        except WriterConstraintError as first_error:
+            # Formatter 的确定性结果反馈给 SelfCritic 做一次有边界的修复，不重跑大纲和初稿。
+            telemetry.formatter_violations.add(
+                1, {"platform": platform.value, "stage": "initial"}
+            )
+            revision = _critic_revision(
+                providers.critic,
+                models.critic,
+                platform_instructions,
+                context,
+                revision,
+                usage,
+                formatter_feedback=str(first_error),
+            )
+            try:
+                formatted = format_article(revision.title, revision.contentMarkdown, profile)
+            except WriterConstraintError:
+                telemetry.formatter_violations.add(
+                    1, {"platform": platform.value, "stage": "repair"}
+                )
+                raise
+
+        article_id = repository.create_article(
+            ArticleInsert(
+                topic_id=topic.id,
+                platform=platform.value,
+                version=1,
+                title=formatted.title,
+                content_md=formatted.content_md,
+                writer_agent=writer_agent,
+            )
+        )
+        repository.update_agent_run(
+            run_id,
+            _run_update(topic.id, writer_agent, recorder.trace_id, usage, "succeeded"),
+        )
+        return WriterResult(article_id, run_id, usage, formatted)
+    except StructuredOutputError as exc:
+        _add_usage(usage, exc.usage)
+        repository.update_agent_run(
+            run_id, _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed")
+        )
+        raise
+    except Exception:
+        repository.update_agent_run(
+            run_id, _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed")
+        )
+        raise
+
+
+def _critic_revision(
+    provider: ModelProvider,
+    model: str,
+    platform_instructions: str,
+    context: str,
+    draft: WriterDraft,
+    usage: Usage,
+    *,
+    formatter_feedback: str | None = None,
+) -> WriterRevision:
+    feedback = (
+        f"\n\nFormatter 检测到以下硬约束问题，必须逐项修复：{formatter_feedback}"
+        if formatter_feedback
+        else ""
+    )
+    data, critic_usage = complete_structured(
+        provider,
+        model,
+        "你是 SelfCritic。检查事实准确、结构、可读性和平台硬约束，直接返回修订稿。\n\n"
+        + platform_instructions,
+        f"素材上下文：\n{context}\n\n待审稿：\n{draft.model_dump_json(indent=2)}{feedback}",
+        WriterRevision.model_json_schema(),
+        max_tokens=8192,
+    )
+    _add_usage(usage, critic_usage)
+    return WriterRevision.model_validate(data)
+
+
+def build_writer_context(
+    topic: TopicRecord,
+    raw_items: list[RawItemRecord],
+    insights: list[InsightRecord],
+    references: list[ArticleReferenceRecord],
+) -> str:
+    materials: list[str] = []
+    remaining = MAX_MATERIAL_CHARACTERS
+    for index, item in enumerate(raw_items, start=1):
+        if remaining <= 0:
+            break
+        content = item.content[:remaining]
+        remaining -= len(content)
+        materials.append(
+            f"素材 {index}（rawItemId={item.id}）\n"
+            f"标题：{item.title}\n来源：{item.source_name}\n"
+            f"URL：{item.url or '无'}\n正文：{content}"
+        )
+    insight_text = "\n".join(
+        f"- {item.content}（confidence={item.confidence:.2f}）" for item in insights
+    ) or "无"
+    reference_text = "\n\n".join(
+        f"高分参考 {index}（{item.latest_score:.1f} 分）：{item.title}\n"
+        f"{item.content_md[:MAX_REFERENCE_CHARACTERS]}"
+        for index, item in enumerate(references, start=1)
+    ) or "无"
+    return f"""选题标题：{topic.title}
+创作角度：{topic.angle}
+摘要：{topic.summary}
+
+事实素材（唯一事实来源）：
+{chr(10).join(materials) or '无额外原文，只能使用选题标题、角度和摘要中的事实'}
+
+已生效写作经验：
+{insight_text}
+
+同平台历史高分参考（只学习结构和表达，禁止复制事实）：
+{reference_text}
+"""
+
+
+def outline_output_schema(raw_items: list[RawItemRecord]) -> dict[str, Any]:
+    schema = deepcopy(WriterOutline.model_json_schema())
+    section = schema["$defs"]["OutlineSection"]
+    evidence = section["properties"]["evidenceRawItemIds"]
+    allowed = [str(item.id) for item in raw_items]
+    evidence["items"] = {"type": "string", "format": "uuid", "enum": allowed}
+    if not allowed:
+        evidence["maxItems"] = 0
+    return schema
+
+
+def _validate_outline_evidence(
+    outline: WriterOutline, raw_items: list[RawItemRecord]
+) -> None:
+    allowed = {item.id for item in raw_items}
+    referenced = {
+        raw_item_id for section in outline.sections for raw_item_id in section.evidenceRawItemIds
+    }
+    unknown = referenced - allowed
+    if unknown:
+        unknown_ids = sorted(map(str, unknown))
+        raise ValueError(f"outline references raw items outside context: {unknown_ids}")
+
+
+def _add_usage(total: Usage, increment: Usage) -> None:
+    total.input_tokens += increment.input_tokens
+    total.output_tokens += increment.output_tokens
+
+
+def _run_update(
+    topic_id: UUID,
+    writer_agent: str,
+    trace_id: str,
+    usage: Usage,
+    status: AgentRunStatus,
+) -> AgentRunInsert:
+    return AgentRunInsert(
+        job_type="article.write",
+        entity_type="topic",
+        entity_id=topic_id,
+        model=writer_agent,
+        prompt_version=PROMPT_VERSION,
+        tokens_in=usage.input_tokens,
+        tokens_out=usage.output_tokens,
+        cost_usd=None,
+        langfuse_trace_id=trace_id,
+        status=status,
+    )

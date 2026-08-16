@@ -34,6 +34,7 @@ jobs_failed: Counter
 jobs_retried: Counter
 jobs_dead_lettered: Counter
 structured_retries: Counter
+formatter_violations: Counter
 items_inserted: Counter
 duplicates: Counter
 job_duration: Histogram
@@ -47,7 +48,8 @@ worker_concurrency: UpDownCounter
 
 def _create_instruments() -> None:
     global jobs_started, jobs_completed, jobs_failed, jobs_retried, jobs_dead_lettered
-    global structured_retries, items_inserted, duplicates, job_duration, queue_wait
+    global structured_retries, formatter_violations, items_inserted, duplicates, job_duration
+    global queue_wait
     global llm_duration, embedding_duration, feed_fetch_duration, page_fetch_duration
     global worker_concurrency
     meter = metrics.get_meter("scholar-agents")
@@ -57,6 +59,7 @@ def _create_instruments() -> None:
     jobs_retried = meter.create_counter("scholar_agent_jobs_retried_total")
     jobs_dead_lettered = meter.create_counter("scholar_agent_jobs_dead_lettered_total")
     structured_retries = meter.create_counter("scholar_agent_structured_retries_total")
+    formatter_violations = meter.create_counter("scholar_agent_formatter_violations_total")
     items_inserted = meter.create_counter("scholar_agent_items_inserted_total")
     duplicates = meter.create_counter("scholar_agent_duplicates_total")
     job_duration = meter.create_histogram("scholar_agent_job_duration_seconds")

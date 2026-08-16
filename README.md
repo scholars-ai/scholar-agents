@@ -17,7 +17,8 @@ src/scholar_agents/
     loop.py             agent loop：while + 工具调度（工具失败回传模型，不炸 loop）
     structured.py       结构化输出：schema 校验失败带反馈重试，耗尽即抛
   worker/consumer.py  pgmq 消费循环（有限重试 + visibility timeout 语义）
-  agents/             六类 Agent（M1 起逐个落地）
+  agents/             Scout / Judge / WriterOrchestrator 等业务 Agent
+  writing/            Platform Profile 加载与确定性 Formatter
 config/model_routing.yaml   模型路由：切换模型改配置，代码零改动
 ```
 
@@ -25,7 +26,7 @@ config/model_routing.yaml   模型路由：切换模型改配置，代码零改�
 
 ```bash
 uv sync
-uv run pytest        # 15 个测试：双协议归一化一致性 + loop/structured 行为
+uv run pytest        # provider/runtime、采集、Topic 与 Writer 行为测试
 uv run ruff check . && uv run mypy   # strict
 ```
 
@@ -37,5 +38,6 @@ uv run ruff check . && uv run mypy   # strict
 - **契约错误必须炸出来**：未知 task 路由、未知工具名、结构化输出重试耗尽，一律抛异常。
 - **重试必须有边界**：结构化输出最多 3 次；quota、余额、认证和模型不存在等永久错误不重试；临时 job 错误最多执行 3 次。
 - **定时 Scout 批次有边界**：普通调度默认最多处理 20 条新素材，在单个 LLM job 可控的前提下支撑 M1 日均产量；手动定向投喂按指定 `rawItemIds` 处理，不受该默认批次限制。
+- **Writer 同构不同魂**：Outliner → Drafter → SelfCritic → Formatter 共用一套骨架，平台差异只从 `scholar-shared/profiles/*.yaml` 注入；Agents 只写 `articles(draft)`，状态推进和 `article_evaluate` 投递仍由 Core 负责。
 - **LLM 请求必须有超时**：默认单次请求 120 秒，可由 `LLM_REQUEST_TIMEOUT_SECONDS` 调整，避免超过 pgmq visibility timeout 后重复领取。
 - 密钥全部走环境变量（`.env.example`），绝不入库。

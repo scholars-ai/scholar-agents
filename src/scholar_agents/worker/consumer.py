@@ -17,10 +17,13 @@ from uuid import UUID
 import structlog
 from psycopg import Connection
 from psycopg.rows import dict_row
+from pydantic import ValidationError
+from scholar_contracts.models import ArticleWriteJob
 
 from scholar_agents import telemetry
 from scholar_agents.agents.judge import run_judge
 from scholar_agents.agents.scout import run_scout
+from scholar_agents.agents.writer import WriterModels, WriterProviders, run_writer
 from scholar_agents.db_access import AgentRepository
 from scholar_agents.errors import JobError, PermanentJobError, ProviderError
 from scholar_agents.job_context import (
@@ -33,6 +36,7 @@ from scholar_agents.job_context import (
 from scholar_agents.observability import ObservedProvider, TraceRecorder
 from scholar_agents.providers.router import ModelRouter
 from scholar_agents.sourcing.handler import SourcingStats, handle_source_fetch
+from scholar_agents.writing.profiles import load_platform_profile
 
 log = structlog.get_logger()
 
@@ -161,12 +165,72 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> Non
         )
 
 
+@handler("article_write")
+def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None:
+    try:
+        job = ArticleWriteJob.model_validate(payload)
+    except ValidationError as exc:
+        raise PermanentJobError(f"invalid article_write payload: {exc}") from exc
+    if job.rewrite is not None:
+        raise PermanentJobError("article rewrite jobs are not enabled in the first M2 slice")
+
+    with telemetry.span(
+        "article_write.process",
+        **{"topic.id": str(job.topicId), "article.platform": job.platform.value},
+    ):
+        router = ModelRouter.from_yaml(_routing_config_path())
+        outline_provider, outline_model = router.resolve("writer_outline")
+        draft_provider, draft_model = router.resolve("writer_draft")
+        critic_provider, critic_model = router.resolve("writer_self_critic")
+        trace = TraceRecorder(name="article-writer")
+        trace.trace(
+            metadata={
+                "jobType": "article.write",
+                "topicId": str(job.topicId),
+                "platform": job.platform.value,
+            }
+        )
+        providers = WriterProviders(
+            outline=ObservedProvider(
+                outline_provider,
+                trace,
+                observation_name="writer-outline-structured",
+                prompt_version="writer-outline@v1",
+            ),
+            draft=ObservedProvider(
+                draft_provider,
+                trace,
+                observation_name="writer-draft-structured",
+                prompt_version="writer-draft@v1",
+            ),
+            critic=ObservedProvider(
+                critic_provider,
+                trace,
+                observation_name="writer-self-critic-structured",
+                prompt_version="writer-self-critic@v1",
+            ),
+        )
+        run_writer(
+            job.topicId,
+            job.platform,
+            load_platform_profile(_profiles_path(), job.platform),
+            providers,
+            WriterModels(outline=outline_model, draft=draft_model, critic=critic_model),
+            AgentRepository(conn),
+            recorder=trace,
+        )
+
+
 def _routing_config_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config" / "model_routing.yaml"
 
 
 def _rubric_path() -> Path:
     return Path(__file__).resolve().parents[4] / "scholar-shared" / "rubrics" / "topic.v2.yaml"
+
+
+def _profiles_path() -> Path:
+    return Path(__file__).resolve().parents[4] / "scholar-shared" / "profiles"
 
 
 def _connect_worker_database(dsn: str) -> Connection[Any]:
