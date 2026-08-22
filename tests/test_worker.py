@@ -7,8 +7,10 @@ from scholar_agents.worker.consumer import (
     HANDLERS,
     MAX_JOB_ATTEMPTS,
     PermanentJobError,
+    _manual_scout_payload,
     is_permanent_error,
     should_retry,
+    workflow_node_key,
 )
 
 
@@ -38,6 +40,16 @@ def test_non_manual_source_fetch_does_not_build_targeted_scout_payload() -> None
     from scholar_agents.worker.consumer import _manual_scout_payload
 
     assert _manual_scout_payload({"sourceId": "source-1"}, ["item-1"]) is None
+
+
+def test_cascade_source_fetch_builds_targeted_scout_payload() -> None:
+    assert _manual_scout_payload(
+        {"sourceId": "source-1", "cascade": True}, ["item-1"]
+    ) == {"rawItemIds": ["item-1"], "cascade": True}
+
+
+def test_workflow_node_key_matches_queue() -> None:
+    assert workflow_node_key("article_evaluate") == "article_evaluate"
 
 
 def test_scheduled_scout_has_bounded_default_item_batch() -> None:

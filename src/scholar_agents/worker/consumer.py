@@ -65,6 +65,75 @@ def retry_delay_seconds(exc: BaseException, read_count: int) -> int:
     return int(min(300, 15 * (2 ** max(0, read_count - 1))))
 
 
+def workflow_node_key(queue: str) -> str:
+    return queue
+
+
+def _workflow_event(
+    conn: Connection[Any],
+    context: JobContext,
+    *,
+    event_type: str,
+    status: str,
+    message: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """老消息没有 workflow_runs 时静默跳过，保持 Worker 向后兼容。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            insert into workflow_events
+                (run_id, node_key, event_type, status, message, payload)
+            select %s, %s, %s, %s, %s, %s::jsonb
+            where exists (select 1 from workflow_runs where id = %s)
+            """,
+            (
+                context.correlation_id,
+                workflow_node_key(context.queue),
+                event_type,
+                status,
+                message,
+                json.dumps(payload or {}, ensure_ascii=False, default=str),
+                context.correlation_id,
+            ),
+        )
+        if event_type == "started":
+            cur.execute(
+                """
+                update workflow_runs
+                set status = 'running', started_at = coalesce(started_at, now())
+                where id = %s and status = 'queued'
+                """,
+                (context.correlation_id,),
+            )
+        elif event_type == "failed":
+            cur.execute(
+                """
+                update workflow_runs
+                set status = 'failed', error_message = %s, completed_at = now()
+                where id = %s and status not in ('succeeded', 'failed')
+                """,
+                (message, context.correlation_id),
+            )
+
+
+def _workflow_result_payload(queue: str, result: object, payload: dict[str, Any]) -> dict[str, Any]:
+    output: dict[str, Any] = {
+        key: payload[key]
+        for key in ("sourceId", "topicId", "articleId", "platform")
+        if key in payload
+    }
+    if isinstance(result, SourcingStats):
+        output.update(result.as_dict())
+        output["itemIds"] = [str(item_id) for item_id in result.item_ids]
+    else:
+        for key in ("created_topics", "clusters_processed"):
+            value = getattr(result, key, None)
+            if value is not None:
+                output[key] = value
+    return output
+
+
 Handler = Callable[[Connection[Any], dict[str, Any]], Any]
 HANDLERS: dict[str, Handler] = {}
 
@@ -97,9 +166,12 @@ def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> S
 
 
 def _manual_scout_payload(payload: dict[str, Any], item_ids: list[str]) -> dict[str, Any] | None:
-    if not payload.get("url") or not item_ids:
+    if (not payload.get("url") and not payload.get("cascade")) or not item_ids:
         return None
-    return {"rawItemIds": item_ids}
+    scout_payload: dict[str, Any] = {"rawItemIds": item_ids}
+    if payload.get("cascade"):
+        scout_payload["cascade"] = True
+    return scout_payload
 
 
 def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
@@ -366,6 +438,14 @@ class Worker:
 
             lease_seconds = math.ceil(self._job_timeout + DEFAULT_VISIBILITY_GRACE_SECONDS)
             self._set_visibility(queue, msg_id, lease_seconds)
+            _workflow_event(
+                self._conn,
+                context,
+                event_type="started",
+                status="running",
+                message="Agent 已开始执行",
+                payload={"queue": queue, "attempt": read_count},
+            )
             self._conn.commit()
             started_at = datetime.now(UTC)
             token = set_current_job(context)
@@ -385,6 +465,14 @@ class Worker:
                     result = fn(self._conn, payload)
                 self._record_source_fetch_run(
                     context, payload, started_at, result=result, error=None
+                )
+                _workflow_event(
+                    self._conn,
+                    context,
+                    event_type="succeeded",
+                    status="succeeded",
+                    message="Agent 执行完成",
+                    payload=_workflow_result_payload(queue, result, payload),
                 )
                 self._mark_completed(context)
                 self._delete(queue, msg_id)
@@ -406,11 +494,27 @@ class Worker:
                 self._record_source_fetch_run(context, payload, started_at, result=None, error=exc)
                 if retry:
                     delay = retry_delay_seconds(exc, read_count)
+                    _workflow_event(
+                        self._conn,
+                        context,
+                        event_type="retrying",
+                        status="queued",
+                        message=f"执行失败，将在 {delay}s 后重试",
+                        payload={"errorType": _error_type(exc), "delaySeconds": delay},
+                    )
                     self._set_visibility(queue, msg_id, delay)
                     self._conn.commit()
                     telemetry.record_job_outcome(context, "retry", error_type)
                     log.warning("job_retry_scheduled", queue=queue, msg_id=msg_id, delay=delay)
                 else:
+                    _workflow_event(
+                        self._conn,
+                        context,
+                        event_type="failed",
+                        status="failed",
+                        message="Agent 执行失败，任务已进入死信",
+                        payload={"errorType": _error_type(exc), "error": str(exc)[:2000]},
+                    )
                     self._archive_failure(context, payload, exc)
                     self._conn.commit()
                     telemetry.record_job_outcome(context, "dead_letter", error_type)
