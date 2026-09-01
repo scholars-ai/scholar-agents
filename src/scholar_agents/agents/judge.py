@@ -92,6 +92,22 @@ class JudgeResult:
     pass_threshold: float = 60.0
 
 
+def _version_override(value: str | None, default: str, kind: str) -> str:
+    if value is None:
+        return default
+    normalized = value.strip()
+    if not normalized:
+        raise TopicJudgeError(f"{kind} version override must not be empty")
+    return normalized
+
+
+def _validate_rubric_version(actual: str, requested: str | None) -> None:
+    if requested is not None and requested.strip() != actual:
+        raise TopicJudgeError(
+            f"requested rubric version {requested!r} does not match loaded rubric {actual!r}"
+        )
+
+
 def run_judge(
     topic_id: Any,
     provider: ModelProvider,
@@ -102,9 +118,14 @@ def run_judge(
     recorder: TraceRecorder | None = None,
     cold_start: bool = True,
     pass_threshold_override: float | None = None,
+    prompt_version_override: str | None = None,
+    rubric_version_override: str | None = None,
+    weight_version_override: int | None = None,
 ) -> JudgeResult:
     with telemetry.span("rubric.load"):
         rubric = load_topic_rubric(rubric_path)
+    prompt_version = _version_override(prompt_version_override, PROMPT_VERSION, "prompt")
+    _validate_rubric_version(rubric.version, rubric_version_override)
     if pass_threshold_override is not None:
         if not 0 <= pass_threshold_override <= 100:
             raise TopicJudgeError("pass threshold override must be between 0 and 100")
@@ -117,6 +138,11 @@ def run_judge(
         weight_set = repository.get_active_weight_set(rubric.rubric_id)
     if weight_set is None:
         raise TopicJudgeError(f"no active weight set for {rubric.rubric_id!r}")
+    if weight_version_override is not None and weight_set.version != weight_version_override:
+        raise TopicJudgeError(
+            "requested topic weight version "
+            f"{weight_version_override} is not active (active={weight_set.version})"
+        )
     with telemetry.span("topic.materials.load", **{"topic.id": str(topic.id)}):
         raw_items = repository.list_topic_raw_items(topic)
     system, user = build_judge_prompt(topic, raw_items, rubric)
@@ -127,7 +153,7 @@ def run_judge(
             entity_type="topic",
             entity_id=topic.id,
             model=model,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version,
             tokens_in=0,
             tokens_out=0,
             cost_usd=None,
@@ -173,7 +199,7 @@ def run_judge(
                     entity_type="topic",
                     entity_id=topic.id,
                     model=model,
-                    prompt_version=PROMPT_VERSION,
+                    prompt_version=prompt_version,
                     tokens_in=usage.input_tokens,
                     tokens_out=usage.output_tokens,
                     cost_usd=None,
@@ -199,7 +225,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version,
                 tokens_in=exc.usage.input_tokens,
                 tokens_out=exc.usage.output_tokens,
                 cost_usd=None,
@@ -216,7 +242,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
-                prompt_version=PROMPT_VERSION,
+                prompt_version=prompt_version,
                 tokens_in=None,
                 tokens_out=None,
                 cost_usd=None,

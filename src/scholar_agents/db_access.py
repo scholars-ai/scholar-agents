@@ -398,6 +398,22 @@ class AgentRepository:
             row = cur.fetchone()
         return None if row is None else ArticleRecord.from_row(row)
 
+    def get_latest_article(self, topic_id: UUID, platform: str) -> ArticleRecord | None:
+        with self._conn.cursor() as cur:
+            cur.execute(
+                """
+                select id, topic_id, platform, version, title, content_md,
+                       writer_agent, status, latest_score, previous_article_id
+                from articles
+                where topic_id = %s and platform = %s::platform
+                order by version desc, created_at desc
+                limit 1
+                """,
+                (topic_id, platform),
+            )
+            row = cur.fetchone()
+        return None if row is None else ArticleRecord.from_row(row)
+
     def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]:
         if not topic.raw_item_ids:
             return []
@@ -820,8 +836,8 @@ class AgentRepository:
                 """
                 insert into articles
                     (topic_id, platform, version, format, title, content_md,
-                     assets, writer_agent, status, previous_article_id)
-                values (%s, %s::platform, %s, 'markdown', %s, %s, '[]'::jsonb, %s, 'draft', %s)
+                     assets, writer_agent, status, previous_article_id, correlation_id)
+                values (%s, %s::platform, %s, 'markdown', %s, %s, '[]'::jsonb, %s, 'draft', %s, %s)
                 on conflict (topic_id, platform, version) do nothing
                 returning id
                 """,
@@ -833,6 +849,7 @@ class AgentRepository:
                     article.content_md,
                     article.writer_agent,
                     article.previous_article_id,
+                    _current_correlation_id(),
                 ),
             )
             row = cur.fetchone()

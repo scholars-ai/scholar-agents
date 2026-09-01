@@ -43,9 +43,10 @@ def test_non_manual_source_fetch_does_not_build_targeted_scout_payload() -> None
 
 
 def test_cascade_source_fetch_builds_targeted_scout_payload() -> None:
-    assert _manual_scout_payload(
-        {"sourceId": "source-1", "cascade": True}, ["item-1"]
-    ) == {"rawItemIds": ["item-1"], "cascade": True}
+    assert _manual_scout_payload({"sourceId": "source-1", "cascade": True}, ["item-1"]) == {
+        "rawItemIds": ["item-1"],
+        "cascade": True,
+    }
 
 
 def test_workflow_node_key_matches_queue() -> None:
@@ -67,6 +68,26 @@ def test_targeted_scout_keeps_all_requested_items() -> None:
     item_ids = [uuid4(), uuid4(), uuid4()]
 
     assert _scout_item_limit({}, item_ids) == len(item_ids)
+
+
+def test_workflow_overrides_are_typed_and_aliases_are_supported() -> None:
+    from scholar_agents.worker.consumer import _override_model, _override_number
+
+    payload = {
+        "workflowConfigOverrides": {
+            "topicJudgeModel": "judge-replay",
+            "topicPassThreshold": 72,
+        }
+    }
+    assert _override_model(payload, "default", "model", "topicJudgeModel") == "judge-replay"
+    assert _override_number(payload, "passThreshold", "topicPassThreshold") == 72.0
+
+
+def test_workflow_override_rejects_boolean_numeric_values() -> None:
+    from scholar_agents.worker.consumer import _override_number
+
+    with pytest.raises(PermanentJobError, match="must be numeric"):
+        _override_number({"workflowConfigOverrides": {"passThreshold": True}}, "passThreshold")
 
 
 @pytest.mark.parametrize(

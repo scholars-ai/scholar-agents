@@ -51,6 +51,9 @@ class FakeRepository:
             return self.previous
         return None
 
+    def get_latest_article(self, _topic_id: UUID, _platform: str) -> ArticleRecord | None:
+        return self.previous
+
     def list_topic_raw_items(self, _topic: TopicRecord) -> list[object]:
         return []
 
@@ -203,3 +206,58 @@ def test_writer_rewrite_creates_new_version_without_mutating_previous() -> None:
     assert previous.status == "rewrite_queued"
     assert outline.calls == 0
     assert draft.calls == critic.calls == 1
+
+
+def test_writer_replay_creates_new_version_from_pending_review_article() -> None:
+    topic_id = uuid4()
+    topic = TopicRecord(
+        topic_id,
+        "可观测 AI 流水线",
+        "重新生成文章",
+        "回放必须隔离父运行产物。",
+        [],
+        ["xiaohongshu"],
+        "written",
+        82.0,
+    )
+    previous = ArticleRecord(
+        uuid4(),
+        topic_id,
+        "xiaohongshu",
+        1,
+        "旧标题",
+        "旧正文",
+        "writer-v1",
+        "pending_review",
+        82.0,
+        None,
+    )
+    content = "这是回放生成的可执行工程说明。" * 42 + "\n#人工智能 #工程实践 #可观测性"
+    repository = FakeRepository(topic, previous)
+    outline = FakeProvider(
+        {
+            "title": "回放标题",
+            "sections": [
+                {"heading": "背景", "purpose": "说明背景", "evidenceRawItemIds": []},
+                {"heading": "分析", "purpose": "展开分析", "evidenceRawItemIds": []},
+                {"heading": "建议", "purpose": "给出建议", "evidenceRawItemIds": []},
+            ],
+        }
+    )
+    run_writer(
+        topic_id,
+        Platform.xiaohongshu,
+        load_platform_profile(PROFILES, Platform.xiaohongshu),
+        WriterProviders(
+            outline=outline,
+            draft=FakeProvider({"title": "回放标题", "contentMarkdown": content}),
+            critic=FakeProvider({"title": "回放标题", "contentMarkdown": content, "changes": []}),
+        ),
+        WriterModels(outline="outline-model", draft="draft-model", critic="critic-model"),
+        repository,  # type: ignore[arg-type]
+        recorder=TraceRecorder(name="writer-replay-test"),
+        replay=True,
+    )
+    assert repository.article is not None
+    assert repository.article.version == 2
+    assert repository.article.previous_article_id == previous.id

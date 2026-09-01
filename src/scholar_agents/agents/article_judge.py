@@ -67,6 +67,22 @@ class ArticleJudgeResult:
     score: ArticleScore
 
 
+def _version_override(value: str | None, default: str, kind: str) -> str:
+    if value is None:
+        return default
+    normalized = value.strip()
+    if not normalized:
+        raise ArticleJudgeError(f"{kind} version override must not be empty")
+    return normalized
+
+
+def _validate_rubric_version(actual: str, requested: str | None) -> None:
+    if requested is not None and requested.strip() != actual:
+        raise ArticleJudgeError(
+            f"requested rubric version {requested!r} does not match loaded rubric {actual!r}"
+        )
+
+
 class ArticleJudgeRepository(Protocol):
     def get_article(self, article_id: UUID) -> ArticleRecord | None: ...
 
@@ -92,8 +108,13 @@ def run_article_judge(
     *,
     recorder: TraceRecorder,
     pass_threshold_override: float | None = None,
+    prompt_version_override: str | None = None,
+    rubric_version_override: str | None = None,
+    weight_version_override: int | None = None,
 ) -> ArticleJudgeResult:
     rubric = load_article_rubric(rubric_path)
+    prompt_version = _version_override(prompt_version_override, PROMPT_VERSION, "prompt")
+    _validate_rubric_version(rubric.version, rubric_version_override)
     if pass_threshold_override is not None:
         if not 0 <= pass_threshold_override <= 100:
             raise ArticleJudgeError("pass threshold override must be between 0 and 100")
@@ -111,6 +132,11 @@ def run_article_judge(
     weight_set = repository.get_active_weight_set(rubric.rubric_id)
     if weight_set is None:
         raise ArticleJudgeError(f"no active weight set for {rubric.rubric_id}")
+    if weight_version_override is not None and weight_set.version != weight_version_override:
+        raise ArticleJudgeError(
+            "requested article weight version "
+            f"{weight_version_override} is not active (active={weight_set.version})"
+        )
     raw_items = repository.list_topic_raw_items(topic)
     system, user = build_article_judge_prompt(article, topic, raw_items, rubric)
     run_id = repository.create_agent_run(
@@ -119,7 +145,7 @@ def run_article_judge(
             entity_type="article",
             entity_id=article.id,
             model=model,
-            prompt_version=PROMPT_VERSION,
+            prompt_version=prompt_version,
             tokens_in=0,
             tokens_out=0,
             cost_usd=None,
@@ -157,20 +183,20 @@ def run_article_judge(
         )
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, usage, "succeeded"),
+            _run_update(article.id, model, recorder.trace_id, usage, "succeeded", prompt_version),
         )
         recorder.score(name="article_total_score", value=score.total_score, comment=rationale)
         return ArticleJudgeResult(evaluation_id, run_id, usage, score)
     except StructuredOutputError as exc:
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, exc.usage, "failed"),
+            _run_update(article.id, model, recorder.trace_id, exc.usage, "failed", prompt_version),
         )
         raise
     except Exception:
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, usage, "failed"),
+            _run_update(article.id, model, recorder.trace_id, usage, "failed", prompt_version),
         )
         raise
 
@@ -192,9 +218,7 @@ def load_article_rubric(path: Path) -> ArticleRubric:
                 name=_required_string(raw, "name"),
                 description=_required_string(raw, "description"),
                 initial_weight=float(raw.get("initialWeight", 0)),
-                veto_below=(
-                    float(raw["vetoBelow"]) if raw.get("vetoBelow") is not None else None
-                ),
+                veto_below=(float(raw["vetoBelow"]) if raw.get("vetoBelow") is not None else None),
             )
         )
     keys = [item.key for item in dimensions]
@@ -273,9 +297,7 @@ def recompute_article_score(
     total_weight = sum(weight_set.weights.values())
     if total_weight <= 0:
         raise ArticleJudgeError("article weights must sum to a positive value")
-    total = sum(
-        scores[key] * 10 * weight_set.weights[key] / total_weight for key in expected
-    )
+    total = sum(scores[key] * 10 * weight_set.weights[key] / total_weight for key in expected)
     vetoed = next(
         (
             item.key
@@ -309,11 +331,14 @@ def build_article_judge_prompt(
 
 只依据文章、选题和原始素材评分。不要输出总分或 passed，代码会按生效权重、过审线
 {rubric.pass_threshold:.0f} 和 veto 规则确定性计算。事实准确性必须逐项对照素材。"""
-    materials = "\n\n---\n\n".join(
-        f"素材 {index}\n标题：{item.title}\n来源：{item.source_name}\n"
-        f"URL：{item.url or '无'}\n正文：{item.content}"
-        for index, item in enumerate(raw_items, start=1)
-    ) or "无额外原文；只能核对选题标题、角度和摘要中明确提供的事实。"
+    materials = (
+        "\n\n---\n\n".join(
+            f"素材 {index}\n标题：{item.title}\n来源：{item.source_name}\n"
+            f"URL：{item.url or '无'}\n正文：{item.content}"
+            for index, item in enumerate(raw_items, start=1)
+        )
+        or "无额外原文；只能核对选题标题、角度和摘要中明确提供的事实。"
+    )
     user = f"""平台：{article.platform}
 文章版本：{article.version}
 选题：{topic.title}
@@ -336,13 +361,14 @@ def _run_update(
     trace_id: str,
     usage: Usage,
     status: AgentRunStatus,
+    prompt_version: str = PROMPT_VERSION,
 ) -> AgentRunInsert:
     return AgentRunInsert(
         job_type="article.evaluate",
         entity_type="article",
         entity_id=article_id,
         model=model,
-        prompt_version=PROMPT_VERSION,
+        prompt_version=prompt_version,
         tokens_in=usage.input_tokens,
         tokens_out=usage.output_tokens,
         cost_usd=None,

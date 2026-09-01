@@ -61,6 +61,8 @@ class WriterRepository(Protocol):
 
     def get_article(self, article_id: UUID) -> ArticleRecord | None: ...
 
+    def get_latest_article(self, topic_id: UUID, platform: str) -> ArticleRecord | None: ...
+
     def list_topic_raw_items(self, topic: TopicRecord) -> list[RawItemRecord]: ...
 
     def list_writing_insights(
@@ -110,6 +112,7 @@ def run_writer(
     *,
     recorder: TraceRecorder,
     rewrite: RewriteContext | None = None,
+    replay: bool = False,
 ) -> WriterResult:
     topic = repository.get_topic(topic_id)
     if topic is None:
@@ -134,6 +137,12 @@ def run_writer(
         if previous.version >= 3:
             raise PermanentJobError("article rewrite limit already reached")
         version = previous.version + 1
+    elif replay:
+        # A node replay must create an isolated article version. The parent
+        # article may be pending review and therefore is not a RewriteContext.
+        previous = repository.get_latest_article(topic.id, platform.value)
+        if previous is not None:
+            version = previous.version + 1
 
     with telemetry.span("writer.context.build", **{"topic.id": str(topic_id)}):
         raw_items = repository.list_topic_raw_items(topic)
@@ -170,8 +179,7 @@ def run_writer(
             outline_data, outline_usage = complete_structured(
                 providers.outline,
                 models.outline,
-                "你是 Outliner，只设计文章的证据链和结构，不写正文。\n\n"
-                + platform_instructions,
+                "你是 Outliner，只设计文章的证据链和结构，不写正文。\n\n" + platform_instructions,
                 context + rewrite_context,
                 outline_output_schema(raw_items),
             )
@@ -187,8 +195,7 @@ def run_writer(
         draft_data, draft_usage = complete_structured(
             providers.draft,
             models.draft,
-            "你是 Drafter，严格依据素材、大纲和平台档案写成 Markdown。\n\n"
-            + platform_instructions,
+            "你是 Drafter，严格依据素材、大纲和平台档案写成 Markdown。\n\n" + platform_instructions,
             f"{context}{rewrite_context}\n\n{drafting_plan}",
             WriterDraft.model_json_schema(),
             max_tokens=8192,
@@ -208,9 +215,7 @@ def run_writer(
             formatted = format_article(revision.title, revision.contentMarkdown, profile)
         except WriterConstraintError as first_error:
             # Formatter 的确定性结果反馈给 SelfCritic 做一次有边界的修复，不重跑大纲和初稿。
-            telemetry.formatter_violations.add(
-                1, {"platform": platform.value, "stage": "initial"}
-            )
+            telemetry.formatter_violations.add(1, {"platform": platform.value, "stage": "initial"})
             revision = _critic_revision(
                 providers.critic,
                 models.critic,
@@ -303,20 +308,24 @@ def build_writer_context(
             f"标题：{item.title}\n来源：{item.source_name}\n"
             f"URL：{item.url or '无'}\n正文：{content}"
         )
-    insight_text = "\n".join(
-        f"- {item.content}（confidence={item.confidence:.2f}）" for item in insights
-    ) or "无"
-    reference_text = "\n\n".join(
-        f"高分参考 {index}（{item.latest_score:.1f} 分）：{item.title}\n"
-        f"{item.content_md[:MAX_REFERENCE_CHARACTERS]}"
-        for index, item in enumerate(references, start=1)
-    ) or "无"
+    insight_text = (
+        "\n".join(f"- {item.content}（confidence={item.confidence:.2f}）" for item in insights)
+        or "无"
+    )
+    reference_text = (
+        "\n\n".join(
+            f"高分参考 {index}（{item.latest_score:.1f} 分）：{item.title}\n"
+            f"{item.content_md[:MAX_REFERENCE_CHARACTERS]}"
+            for index, item in enumerate(references, start=1)
+        )
+        or "无"
+    )
     return f"""选题标题：{topic.title}
 创作角度：{topic.angle}
 摘要：{topic.summary}
 
 事实素材（唯一事实来源）：
-{chr(10).join(materials) or '无额外原文，只能使用选题标题、角度和摘要中的事实'}
+{chr(10).join(materials) or "无额外原文，只能使用选题标题、角度和摘要中的事实"}
 
 已生效写作经验：
 {insight_text}
@@ -326,9 +335,7 @@ def build_writer_context(
 """
 
 
-def _rewrite_prompt(
-    previous: ArticleRecord | None, rewrite: RewriteContext | None
-) -> str:
+def _rewrite_prompt(previous: ArticleRecord | None, rewrite: RewriteContext | None) -> str:
     if previous is None or rewrite is None:
         return ""
     return f"""
@@ -341,7 +348,7 @@ def _rewrite_prompt(
 独立 ArticleJudge 的评审反馈：
 {rewrite.evaluationFeedback}
 
-是否重做大纲：{'是' if rewrite.redoOutline else '否'}
+是否重做大纲：{"是" if rewrite.redoOutline else "否"}
 必须针对反馈修订，不能仅做同义改写。
 """
 
@@ -357,9 +364,7 @@ def outline_output_schema(raw_items: list[RawItemRecord]) -> dict[str, Any]:
     return schema
 
 
-def _validate_outline_evidence(
-    outline: WriterOutline, raw_items: list[RawItemRecord]
-) -> None:
+def _validate_outline_evidence(outline: WriterOutline, raw_items: list[RawItemRecord]) -> None:
     allowed = {item.id for item in raw_items}
     referenced = {
         raw_item_id for section in outline.sections for raw_item_id in section.evidenceRawItemIds

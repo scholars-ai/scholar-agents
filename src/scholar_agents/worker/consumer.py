@@ -162,6 +162,8 @@ def _record_workflow_failure_decision(
                 json.dumps({"queue": context.queue}),
             ),
         )
+
+
 def _record_workflow_decision(
     conn: Connection[Any], context: JobContext, payload: dict[str, Any], result: object
 ) -> None:
@@ -319,12 +321,32 @@ def _override_model(payload: dict[str, Any], current: str, *keys: str) -> str:
 
 def _override_number(payload: dict[str, Any], *keys: str) -> float | None:
     value = _override_value(payload, *keys)
-    if value is None or isinstance(value, bool):
+    if value is None:
         return None
+    if isinstance(value, bool):
+        raise PermanentJobError(f"workflow override {keys[0]!r} must be numeric")
     try:
         return float(value)
     except (TypeError, ValueError):
         raise PermanentJobError(f"workflow override {keys[0]!r} must be numeric") from None
+
+
+def _override_int(payload: dict[str, Any], *keys: str) -> int | None:
+    value = _override_number(payload, *keys)
+    if value is None:
+        return None
+    if value != int(value):
+        raise PermanentJobError(f"workflow override {keys[0]!r} must be an integer")
+    return int(value)
+
+
+def _version_override(payload: dict[str, Any], *keys: str) -> str | None:
+    value = _override_value(payload, *keys)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise PermanentJobError(f"workflow override {keys[0]!r} must be a non-empty string")
+    return value.strip()
 
 
 Handler = Callable[[Connection[Any], dict[str, Any]], Any]
@@ -448,7 +470,12 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
         if isinstance(model_override, str) and model_override.strip():
             model = model_override.strip()
         trace = TraceRecorder(name="topic-scout")
-        trace.trace(metadata={"jobType": "topic.scout"})
+        trace.trace(
+            metadata={
+                "jobType": "topic.scout",
+                "agentVersion": _version_override(payload, "agentVersion"),
+            }
+        )
         provider = ObservedProvider(
             provider,
             trace,
@@ -485,8 +512,20 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> obj
         model_override = _override_value(payload, "model", "topicJudgeModel")
         if isinstance(model_override, str) and model_override.strip():
             model = model_override.strip()
+        prompt_version = _version_override(payload, "promptVersion")
+        rubric_version = _version_override(payload, "rubricVersion", "topicRubricVersion")
+        weight_version = _override_int(payload, "weightVersion", "topicWeightVersion")
         trace = TraceRecorder(name="topic-judge")
-        trace.trace(metadata={"jobType": "topic.evaluate", "topicId": str(topic_id)})
+        trace.trace(
+            metadata={
+                "jobType": "topic.evaluate",
+                "topicId": str(topic_id),
+                "agentVersion": _version_override(payload, "agentVersion"),
+                "promptVersion": prompt_version,
+                "rubricVersion": rubric_version,
+                "weightVersion": weight_version,
+            }
+        )
         observed_provider = ObservedProvider(
             provider,
             trace,
@@ -503,6 +542,9 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> obj
             pass_threshold_override=_override_number(
                 payload, "passThreshold", "topicPassThreshold"
             ),
+            prompt_version_override=prompt_version,
+            rubric_version_override=rubric_version,
+            weight_version_override=weight_version,
         )
 
 
@@ -523,12 +565,15 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
         outline_model = _override_model(payload, outline_model, "outlineModel", "model")
         draft_model = _override_model(payload, draft_model, "draftModel", "model")
         critic_model = _override_model(payload, critic_model, "criticModel", "model")
+        prompt_version = _version_override(payload, "promptVersion")
         trace = TraceRecorder(name="article-writer")
         trace.trace(
             metadata={
                 "jobType": "article.write",
                 "topicId": str(job.topicId),
                 "platform": job.platform.value,
+                "agentVersion": _version_override(payload, "agentVersion"),
+                "promptVersion": prompt_version,
             }
         )
         providers = WriterProviders(
@@ -560,6 +605,7 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
             AgentRepository(conn),
             recorder=trace,
             rewrite=job.rewrite,
+            replay=bool(job.replay),
         )
 
 
@@ -575,8 +621,20 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> o
         model_override = _override_value(payload, "model", "articleJudgeModel")
         if isinstance(model_override, str) and model_override.strip():
             model = model_override.strip()
+        prompt_version = _version_override(payload, "promptVersion")
+        rubric_version = _version_override(payload, "rubricVersion", "articleRubricVersion")
+        weight_version = _override_int(payload, "weightVersion", "articleWeightVersion")
         trace = TraceRecorder(name="article-judge")
-        trace.trace(metadata={"jobType": "article.evaluate", "articleId": str(job.articleId)})
+        trace.trace(
+            metadata={
+                "jobType": "article.evaluate",
+                "articleId": str(job.articleId),
+                "agentVersion": _version_override(payload, "agentVersion"),
+                "promptVersion": prompt_version,
+                "rubricVersion": rubric_version,
+                "weightVersion": weight_version,
+            }
+        )
         observed_provider = ObservedProvider(
             provider,
             trace,
@@ -597,6 +655,9 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> o
             pass_threshold_override=_override_number(
                 payload, "passThreshold", "articlePassThreshold"
             ),
+            prompt_version_override=prompt_version,
+            rubric_version_override=rubric_version,
+            weight_version_override=weight_version,
         )
 
 
