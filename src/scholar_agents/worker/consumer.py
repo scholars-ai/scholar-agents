@@ -82,6 +82,20 @@ def _workflow_event(
     with conn.cursor() as cur:
         cur.execute(
             """
+            insert into workflow_node_runs (run_id, node_key, status, config_snapshot)
+            select %s, %s, 'queued', %s::jsonb
+            where exists (select 1 from workflow_runs where id = %s)
+            on conflict (run_id, node_key) do nothing
+            """,
+            (
+                context.correlation_id,
+                workflow_node_key(context.queue),
+                json.dumps({"queue": context.queue}, ensure_ascii=False),
+                context.correlation_id,
+            ),
+        )
+        cur.execute(
+            """
             insert into workflow_events
                 (run_id, node_key, event_type, status, message, payload)
             select %s, %s, %s, %s, %s, %s::jsonb
@@ -100,6 +114,14 @@ def _workflow_event(
         if event_type == "started":
             cur.execute(
                 """
+                update workflow_node_runs
+                set status = 'running', started_at = coalesce(started_at, now())
+                where run_id = %s and node_key = %s
+                """,
+                (context.correlation_id, workflow_node_key(context.queue)),
+            )
+            cur.execute(
+                """
                 update workflow_runs
                 set status = 'running', started_at = coalesce(started_at, now())
                 where id = %s and status = 'queued'
@@ -109,12 +131,100 @@ def _workflow_event(
         elif event_type == "failed":
             cur.execute(
                 """
+                update workflow_node_runs
+                set status = 'failed', completed_at = now(),
+                    counts = jsonb_set(counts, '{failed}',
+                        to_jsonb(coalesce((counts->>'failed')::int, 0) + 1))
+                where run_id = %s and node_key = %s
+                """,
+                (context.correlation_id, workflow_node_key(context.queue)),
+            )
+            cur.execute(
+                """
                 update workflow_runs
                 set status = 'failed', error_message = %s, completed_at = now()
-                where id = %s and status not in ('succeeded', 'failed')
+                where id = %s and status not in
+                    ('completed', 'completed_empty', 'partial_failed', 'failed', 'cancelled')
                 """,
                 (message, context.correlation_id),
             )
+        elif event_type == "succeeded":
+            cur.execute(
+                """
+                update workflow_node_runs set status = 'succeeded', completed_at = now()
+                where run_id = %s and node_key = %s
+                """,
+                (context.correlation_id, workflow_node_key(context.queue)),
+            )
+
+
+def _record_workflow_decision(
+    conn: Connection[Any], context: JobContext, payload: dict[str, Any], result: object
+) -> None:
+    if context.correlation_id is None or context.queue not in {
+        "topic_evaluate",
+        "article_evaluate",
+    }:
+        return
+    item_key = "topicId" if context.queue == "topic_evaluate" else "articleId"
+    item_type = "topic" if context.queue == "topic_evaluate" else "article"
+    try:
+        item_id = UUID(
+            str(payload.get(item_key) or payload.get(item_key[0].lower() + item_key[1:]))
+        )
+    except (TypeError, ValueError):
+        return
+    passed = True
+    total_score: float | None = None
+    reason_code = "passed"
+    reason = "评估通过"
+    agent_run_id = None
+    if context.queue == "article_evaluate":
+        score = getattr(result, "score", None)
+        passed = bool(getattr(score, "passed", False))
+        total_score = getattr(score, "total_score", None)
+        agent_run_id = getattr(result, "agent_run_id", None)
+        if not passed:
+            reason_code = "article_quality_rejected"
+            reason = getattr(score, "vetoed_dimension", None) or "未达到文章评估通过条件"
+    else:
+        passed = getattr(result, "vetoed_dimension", None) is None
+        total_score = getattr(result, "total_score", None)
+        agent_run_id = getattr(result, "agent_run_id", None)
+        if not passed:
+            reason_code = "topic_vetoed"
+            reason = f"触发否决维度: {getattr(result, 'vetoed_dimension', '')}"
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id from workflow_node_runs where run_id = %s and node_key = %s",
+            (context.correlation_id, context.queue),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return
+        node_run_id = row[0] if not isinstance(row, dict) else row["id"]
+        cur.execute(
+            """
+            insert into workflow_item_decisions
+              (run_id, node_run_id, item_id, item_type, decision, reason_code,
+               reason, total_score, input_refs, evidence_refs, agent_run_id, trace_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+            """,
+            (
+                context.correlation_id,
+                node_run_id,
+                item_id,
+                item_type,
+                "accepted" if passed else "rejected",
+                reason_code,
+                reason,
+                total_score,
+                json.dumps({item_key: str(item_id)}),
+                json.dumps({"queue": context.queue}),
+                agent_run_id,
+                None,
+            ),
+        )
 
 
 def _workflow_result_payload(queue: str, result: object, payload: dict[str, Any]) -> dict[str, Any]:
@@ -166,6 +276,9 @@ def handle_source_fetch_job(conn: Connection[Any], payload: dict[str, Any]) -> S
 
 
 def _manual_scout_payload(payload: dict[str, Any], item_ids: list[str]) -> dict[str, Any] | None:
+    # SPEC-010 runs scout once after all source_fetch fan-out jobs finish.
+    if payload.get("workflowRunId"):
+        return None
     if (not payload.get("url") and not payload.get("cascade")) or not item_ids:
         return None
     scout_payload: dict[str, Any] = {"rawItemIds": item_ids}
@@ -179,6 +292,68 @@ def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
         return len(raw_item_ids)
     value = payload.get("maxItems", DEFAULT_SCOUT_MAX_ITEMS)
     return int(value)
+
+
+def _maybe_enqueue_workflow_scout(conn: Connection[Any], context: JobContext) -> None:
+    """Release the topic_scout barrier only after every source in the run succeeded."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            "select metadata from workflow_runs where id = %s for update",
+            (context.correlation_id,),
+        )
+        run = cur.fetchone()
+        if run is None:
+            return
+        expected = int((run["metadata"] or {}).get("sourceCount", 0))
+        cur.execute(
+            """
+            select count(*) as count from workflow_events
+            where run_id = %s and node_key = 'source_fetch' and event_type = 'succeeded'
+            """,
+            (context.correlation_id,),
+        )
+        count_row = cur.fetchone()
+        completed = int(count_row["count"]) if count_row is not None else 0
+        if completed < expected:
+            cur.execute(
+                """
+                update workflow_node_runs set status = 'running', completed_at = null
+                where run_id = %s and node_key = 'source_fetch'
+                """,
+                (context.correlation_id,),
+            )
+            return
+        cur.execute(
+            """
+            select 1 from workflow_events
+            where run_id = %s and node_key = 'topic_scout' and event_type = 'queued'
+            limit 1
+            """,
+            (context.correlation_id,),
+        )
+        if cur.fetchone() is not None:
+            return
+        cur.execute(
+            "select id::text as id from raw_items "
+            "where correlation_id = %s order by created_at asc",
+            (context.correlation_id,),
+        )
+        raw_item_ids = [row["id"] for row in cur.fetchall()]
+        scout_payload = {
+            "rawItemIds": raw_item_ids,
+            "cascade": True,
+            "workflowRunId": str(context.correlation_id),
+        }
+        cur.execute("select pgmq.send(%s, %s::jsonb)", ("topic_scout", json.dumps(scout_payload)))
+        cur.execute(
+            """
+            insert into workflow_events
+              (run_id, node_key, event_type, status, message, payload)
+            values (%s, 'topic_scout', 'queued', 'queued',
+                    '采集阶段完成，选题阶段已入队', %s::jsonb)
+            """,
+            (context.correlation_id, json.dumps({"rawItemCount": len(raw_item_ids)})),
+        )
 
 
 @handler("topic_scout")
@@ -214,7 +389,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
 
 
 @handler("topic_evaluate")
-def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
+def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> object:
     topic_id = payload.get("topicId") or payload.get("topic_id")
     if not topic_id:
         raise PermanentJobError("topic_evaluate payload requires topicId")
@@ -229,7 +404,7 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> Non
             observation_name="topic-judge-structured",
             prompt_version="topic-judge@v2",
         )
-        run_judge(
+        return run_judge(
             topic_id,
             observed_provider,
             model,
@@ -294,7 +469,7 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
 
 
 @handler("article_evaluate")
-def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> None:
+def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> object:
     try:
         job = ArticleEvaluateJob.model_validate(payload)
     except ValidationError as exc:
@@ -314,7 +489,7 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> N
         article = repository.get_article(job.articleId)
         if article is None:
             raise PermanentJobError(f"article {job.articleId} not found")
-        run_article_judge(
+        return run_article_judge(
             job.articleId,
             observed_provider,
             model,
@@ -463,6 +638,7 @@ class Worker:
                     hard_deadline(context.remaining_seconds()),
                 ):
                     result = fn(self._conn, payload)
+                _record_workflow_decision(self._conn, context, payload, result)
                 self._record_source_fetch_run(
                     context, payload, started_at, result=result, error=None
                 )
@@ -474,6 +650,8 @@ class Worker:
                     message="Agent 执行完成",
                     payload=_workflow_result_payload(queue, result, payload),
                 )
+                if queue == "source_fetch" and payload.get("workflowRunId"):
+                    _maybe_enqueue_workflow_scout(self._conn, context)
                 self._mark_completed(context)
                 self._delete(queue, msg_id)
                 self._conn.commit()
