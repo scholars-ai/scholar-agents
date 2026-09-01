@@ -180,6 +180,41 @@ def test_run_article_judge_recomputes_and_persists_deterministic_decision() -> N
     assert trace.scores == [("article_total_score", 80.0, "独立评分理由")]
 
 
+def test_run_article_judge_allows_pending_review_for_replay() -> None:
+    article, topic, item = _fixtures()
+    article = ArticleRecord(
+        article.id,
+        article.topic_id,
+        article.platform,
+        article.version,
+        article.title,
+        article.content_md,
+        article.writer_agent,
+        "pending_review",
+        article.latest_score,
+        article.previous_article_id,
+    )
+    rubric = load_article_rubric(RUBRICS / "article-xiaohongshu.v1.yaml")
+    weights = WeightSetRecord(
+        rubric.rubric_id,
+        1,
+        {dimension.key: dimension.initial_weight for dimension in rubric.dimensions},
+    )
+    repository = FakeArticleJudgeRepository(article, topic, item, weights)
+
+    result = run_article_judge(
+        article.id,
+        FakeArticleJudgeProvider({key: 8.0 for key in rubric.dimension_keys}),
+        "fake-model",
+        repository,
+        RUBRICS / "article-xiaohongshu.v1.yaml",
+        recorder=FakeTrace(),  # type: ignore[arg-type]
+    )
+
+    assert result.score.passed
+    assert len(repository.evaluations) == 1
+
+
 def test_article_judge_rejects_platform_rubric_mismatch() -> None:
     article, topic, item = _fixtures("zhihu")
     rubric = load_article_rubric(RUBRICS / "article-xiaohongshu.v1.yaml")

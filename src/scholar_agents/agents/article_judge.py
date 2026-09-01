@@ -122,8 +122,8 @@ def run_article_judge(
     article = repository.get_article(article_id)
     if article is None:
         raise ArticleJudgeError(f"article {article_id} not found")
-    if article.status != "draft":
-        raise ArticleJudgeError(f"article {article_id} is not draft: {article.status}")
+    if article.status not in {"draft", "pending_review"}:
+        raise ArticleJudgeError(f"article {article_id} cannot be evaluated: {article.status}")
     if rubric.rubric_id != f"article/{article.platform}":
         raise ArticleJudgeError("article platform does not match rubric")
     topic = repository.get_topic(article.topic_id)
