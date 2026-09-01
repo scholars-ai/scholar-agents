@@ -299,6 +299,34 @@ def _workflow_result_payload(queue: str, result: object, payload: dict[str, Any]
     return output
 
 
+def _workflow_overrides(payload: dict[str, Any]) -> dict[str, Any]:
+    value = payload.get("workflowConfigOverrides")
+    return value if isinstance(value, dict) else {}
+
+
+def _override_value(payload: dict[str, Any], *keys: str) -> Any:
+    overrides = _workflow_overrides(payload)
+    for key in keys:
+        if key in overrides:
+            return overrides[key]
+    return None
+
+
+def _override_model(payload: dict[str, Any], current: str, *keys: str) -> str:
+    value = _override_value(payload, *keys)
+    return value.strip() if isinstance(value, str) and value.strip() else current
+
+
+def _override_number(payload: dict[str, Any], *keys: str) -> float | None:
+    value = _override_value(payload, *keys)
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise PermanentJobError(f"workflow override {keys[0]!r} must be numeric") from None
+
+
 Handler = Callable[[Connection[Any], dict[str, Any]], Any]
 HANDLERS: dict[str, Handler] = {}
 
@@ -416,6 +444,9 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
     with telemetry.span("topic_scout.process"):
         router = ModelRouter.from_yaml(_routing_config_path())
         provider, model = router.resolve("topic_scout")
+        model_override = _override_value(payload, "model", "topicScoutModel")
+        if isinstance(model_override, str) and model_override.strip():
+            model = model_override.strip()
         trace = TraceRecorder(name="topic-scout")
         trace.trace(metadata={"jobType": "topic.scout"})
         provider = ObservedProvider(
@@ -451,6 +482,9 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> obj
     with telemetry.span("topic_evaluate.process", **{"topic.id": str(topic_id)}):
         router = ModelRouter.from_yaml(_routing_config_path())
         provider, model = router.resolve("topic_judge")
+        model_override = _override_value(payload, "model", "topicJudgeModel")
+        if isinstance(model_override, str) and model_override.strip():
+            model = model_override.strip()
         trace = TraceRecorder(name="topic-judge")
         trace.trace(metadata={"jobType": "topic.evaluate", "topicId": str(topic_id)})
         observed_provider = ObservedProvider(
@@ -466,6 +500,9 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> obj
             AgentRepository(conn),
             _rubric_path(),
             recorder=trace,
+            pass_threshold_override=_override_number(
+                payload, "passThreshold", "topicPassThreshold"
+            ),
         )
 
 
@@ -483,6 +520,9 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
         outline_provider, outline_model = router.resolve("writer_outline")
         draft_provider, draft_model = router.resolve("writer_draft")
         critic_provider, critic_model = router.resolve("writer_self_critic")
+        outline_model = _override_model(payload, outline_model, "outlineModel", "model")
+        draft_model = _override_model(payload, draft_model, "draftModel", "model")
+        critic_model = _override_model(payload, critic_model, "criticModel", "model")
         trace = TraceRecorder(name="article-writer")
         trace.trace(
             metadata={
@@ -532,6 +572,9 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> o
     with telemetry.span("article_evaluate.process", **{"article.id": str(job.articleId)}):
         router = ModelRouter.from_yaml(_routing_config_path())
         provider, model = router.resolve("article_judge")
+        model_override = _override_value(payload, "model", "articleJudgeModel")
+        if isinstance(model_override, str) and model_override.strip():
+            model = model_override.strip()
         trace = TraceRecorder(name="article-judge")
         trace.trace(metadata={"jobType": "article.evaluate", "articleId": str(job.articleId)})
         observed_provider = ObservedProvider(
@@ -551,6 +594,9 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> o
             repository,
             _article_rubric_path(article.platform),
             recorder=trace,
+            pass_threshold_override=_override_number(
+                payload, "passThreshold", "articlePassThreshold"
+            ),
         )
 
 

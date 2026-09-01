@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 from uuid import UUID
@@ -91,8 +91,13 @@ def run_article_judge(
     rubric_path: Path,
     *,
     recorder: TraceRecorder,
+    pass_threshold_override: float | None = None,
 ) -> ArticleJudgeResult:
     rubric = load_article_rubric(rubric_path)
+    if pass_threshold_override is not None:
+        if not 0 <= pass_threshold_override <= 100:
+            raise ArticleJudgeError("pass threshold override must be between 0 and 100")
+        rubric = replace(rubric, pass_threshold=pass_threshold_override)
     article = repository.get_article(article_id)
     if article is None:
         raise ArticleJudgeError(f"article {article_id} not found")

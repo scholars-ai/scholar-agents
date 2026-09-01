@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -101,9 +101,14 @@ def run_judge(
     *,
     recorder: TraceRecorder | None = None,
     cold_start: bool = True,
+    pass_threshold_override: float | None = None,
 ) -> JudgeResult:
     with telemetry.span("rubric.load"):
         rubric = load_topic_rubric(rubric_path)
+    if pass_threshold_override is not None:
+        if not 0 <= pass_threshold_override <= 100:
+            raise TopicJudgeError("pass threshold override must be between 0 and 100")
+        rubric = replace(rubric, pass_threshold=pass_threshold_override)
     with telemetry.span("topic.load", **{"topic.id": str(topic_id)}):
         topic = repository.get_topic(topic_id)
     if topic is None:
