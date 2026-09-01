@@ -88,6 +88,8 @@ class JudgeResult:
     usage: Usage
     total_score: float
     vetoed_dimension: str | None
+    passed: bool
+    pass_threshold: float = 60.0
 
 
 def run_judge(
@@ -175,7 +177,15 @@ def run_judge(
                 ),
             )
         trace.score(name="topic_total_score", value=score.total_score, comment=output.rationale)
-        return JudgeResult(evaluation_id, run_id, usage, score.total_score, score.vetoed_dimension)
+        return JudgeResult(
+            evaluation_id,
+            run_id,
+            usage,
+            score.total_score,
+            score.vetoed_dimension,
+            score.vetoed_dimension is None and score.total_score >= rubric.pass_threshold,
+            rubric.pass_threshold,
+        )
     except StructuredOutputError as exc:
         repository.update_agent_run(
             run_id,

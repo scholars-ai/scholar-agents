@@ -111,53 +111,57 @@ def _workflow_event(
                 context.correlation_id,
             ),
         )
-        if event_type == "started":
-            cur.execute(
-                """
-                update workflow_node_runs
-                set status = 'running', started_at = coalesce(started_at, now())
-                where run_id = %s and node_key = %s
-                """,
-                (context.correlation_id, workflow_node_key(context.queue)),
-            )
-            cur.execute(
-                """
-                update workflow_runs
-                set status = 'running', started_at = coalesce(started_at, now())
-                where id = %s and status = 'queued'
-                """,
-                (context.correlation_id,),
-            )
-        elif event_type == "failed":
-            cur.execute(
-                """
-                update workflow_node_runs
-                set status = 'failed', completed_at = now(),
-                    counts = jsonb_set(counts, '{failed}',
-                        to_jsonb(coalesce((counts->>'failed')::int, 0) + 1))
-                where run_id = %s and node_key = %s
-                """,
-                (context.correlation_id, workflow_node_key(context.queue)),
-            )
-            cur.execute(
-                """
-                update workflow_runs
-                set status = 'failed', error_message = %s, completed_at = now()
-                where id = %s and status not in
-                    ('completed', 'completed_empty', 'partial_failed', 'failed', 'cancelled')
-                """,
-                (message, context.correlation_id),
-            )
-        elif event_type == "succeeded":
-            cur.execute(
-                """
-                update workflow_node_runs set status = 'succeeded', completed_at = now()
-                where run_id = %s and node_key = %s
-                """,
-                (context.correlation_id, workflow_node_key(context.queue)),
-            )
+        # Core's workflow runtime is the sole authority for node/run terminal
+        # state. A worker event describes one item attempt only; a barrier must
+        # observe all expected items before it can close a node or run.
 
 
+def _record_workflow_failure_decision(
+    conn: Connection[Any], context: JobContext, payload: dict[str, Any], error: BaseException
+) -> None:
+    """Persist a terminal technical failure as an item decision when possible."""
+    if context.correlation_id is None:
+        return
+    identity = next(
+        ((key, payload[key]) for key in ("sourceId", "topicId", "articleId") if payload.get(key)),
+        None,
+    )
+    if identity is None:
+        return
+    key, value = identity
+    item_type = {"sourceId": "raw_item", "topicId": "topic", "articleId": "article"}[key]
+    try:
+        item_id = UUID(str(value))
+    except (TypeError, ValueError):
+        return
+    with conn.cursor() as cur:
+        cur.execute(
+            "select id from workflow_node_runs where run_id = %s and node_key = %s",
+            (context.correlation_id, context.queue),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return
+        node_run_id = row[0] if not isinstance(row, dict) else row["id"]
+        cur.execute(
+            """
+            insert into workflow_item_decisions
+              (run_id, node_run_id, item_id, item_type, decision, reason_code,
+               reason, input_refs, evidence_refs)
+            values (%s, %s, %s, %s, 'failed', 'technical_failure', %s,
+                    %s::jsonb, %s::jsonb)
+            on conflict (run_id, node_run_id, item_id) do nothing
+            """,
+            (
+                context.correlation_id,
+                node_run_id,
+                item_id,
+                item_type,
+                str(error)[:2000],
+                json.dumps({key: str(item_id)}),
+                json.dumps({"queue": context.queue}),
+            ),
+        )
 def _record_workflow_decision(
     conn: Connection[Any], context: JobContext, payload: dict[str, Any], result: object
 ) -> None:
@@ -179,21 +183,30 @@ def _record_workflow_decision(
     reason_code = "passed"
     reason = "评估通过"
     agent_run_id = None
+    threshold: float | None = None
     if context.queue == "article_evaluate":
         score = getattr(result, "score", None)
         passed = bool(getattr(score, "passed", False))
         total_score = getattr(score, "total_score", None)
+        threshold = getattr(score, "pass_threshold", None)
         agent_run_id = getattr(result, "agent_run_id", None)
         if not passed:
             reason_code = "article_quality_rejected"
             reason = getattr(score, "vetoed_dimension", None) or "未达到文章评估通过条件"
     else:
-        passed = getattr(result, "vetoed_dimension", None) is None
+        passed = bool(getattr(result, "passed", False))
         total_score = getattr(result, "total_score", None)
+        threshold = getattr(result, "pass_threshold", None)
         agent_run_id = getattr(result, "agent_run_id", None)
         if not passed:
-            reason_code = "topic_vetoed"
-            reason = f"触发否决维度: {getattr(result, 'vetoed_dimension', '')}"
+            veto = getattr(result, "vetoed_dimension", None)
+            reason_code = "topic_vetoed" if veto else "topic_score_below_threshold"
+            reason = f"触发否决维度: {veto}" if veto else "总分未达到选题评估通过阈值"
+    evaluation_id = getattr(result, "evaluation_id", None)
+    dimension_scores: dict[str, Any] = {}
+    rubric_version: str | None = None
+    weight_version: int | None = None
+    trace_id: str | None = None
     with conn.cursor() as cur:
         cur.execute(
             "select id from workflow_node_runs where run_id = %s and node_key = %s",
@@ -203,12 +216,50 @@ def _record_workflow_decision(
         if row is None:
             return
         node_run_id = row[0] if not isinstance(row, dict) else row["id"]
+        if evaluation_id is not None:
+            table = "article_evaluations" if item_type == "article" else "topic_evaluations"
+            threshold_column = (
+                "pass_threshold"
+                if table == "article_evaluations"
+                else "null::numeric as pass_threshold"
+            )
+            with conn.cursor(row_factory=dict_row) as details:
+                details.execute(
+                    f"select rubric_version, dimension_scores, weight_version, "
+                    f"{threshold_column}, "
+                    "agent_run_id from " + table + " where id = %s",
+                    (evaluation_id,),
+                )
+                evaluation = details.fetchone()
+            if evaluation:
+                raw_dimensions = evaluation.get("dimension_scores")
+                if isinstance(raw_dimensions, str):
+                    raw_dimensions = json.loads(raw_dimensions)
+                if isinstance(raw_dimensions, dict):
+                    dimension_scores = raw_dimensions
+                rubric_version = evaluation.get("rubric_version")
+                weight_version = evaluation.get("weight_version")
+                if evaluation.get("pass_threshold") is not None:
+                    threshold = float(evaluation["pass_threshold"])
+                agent_run_id = evaluation.get("agent_run_id") or agent_run_id
+            if agent_run_id:
+                with conn.cursor(row_factory=dict_row) as agent_cursor:
+                    agent_cursor.execute(
+                        "select langfuse_trace_id from agent_runs where id = %s",
+                        (agent_run_id,),
+                    )
+                    agent = agent_cursor.fetchone()
+                    if agent:
+                        trace_id = agent.get("langfuse_trace_id")
         cur.execute(
             """
             insert into workflow_item_decisions
               (run_id, node_run_id, item_id, item_type, decision, reason_code,
-               reason, total_score, input_refs, evidence_refs, agent_run_id, trace_id)
-            values (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s, %s)
+               reason, dimension_scores, total_score, threshold, weight_version,
+               rubric_version, input_refs, evidence_refs, agent_run_id, trace_id)
+            values (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s, %s,
+                    %s::jsonb, %s::jsonb, %s, %s)
+            on conflict (run_id, node_run_id, item_id) do nothing
             """,
             (
                 context.correlation_id,
@@ -218,11 +269,15 @@ def _record_workflow_decision(
                 "accepted" if passed else "rejected",
                 reason_code,
                 reason,
+                json.dumps(dimension_scores, ensure_ascii=False),
                 total_score,
+                threshold,
+                weight_version,
+                rubric_version,
                 json.dumps({item_key: str(item_id)}),
                 json.dumps({"queue": context.queue}),
                 agent_run_id,
-                None,
+                trace_id,
             ),
         )
 
@@ -650,8 +705,6 @@ class Worker:
                     message="Agent 执行完成",
                     payload=_workflow_result_payload(queue, result, payload),
                 )
-                if queue == "source_fetch" and payload.get("workflowRunId"):
-                    _maybe_enqueue_workflow_scout(self._conn, context)
                 self._mark_completed(context)
                 self._delete(queue, msg_id)
                 self._conn.commit()
@@ -685,13 +738,22 @@ class Worker:
                     telemetry.record_job_outcome(context, "retry", error_type)
                     log.warning("job_retry_scheduled", queue=queue, msg_id=msg_id, delay=delay)
                 else:
+                    _record_workflow_failure_decision(self._conn, context, payload, exc)
                     _workflow_event(
                         self._conn,
                         context,
                         event_type="failed",
                         status="failed",
                         message="Agent 执行失败，任务已进入死信",
-                        payload={"errorType": _error_type(exc), "error": str(exc)[:2000]},
+                        payload={
+                            "errorType": _error_type(exc),
+                            "error": str(exc)[:2000],
+                            **{
+                                key: payload[key]
+                                for key in ("sourceId", "topicId", "articleId", "platform")
+                                if key in payload
+                            },
+                        },
                     )
                     self._archive_failure(context, payload, exc)
                     self._conn.commit()

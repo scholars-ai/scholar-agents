@@ -56,6 +56,7 @@ class ArticleScore:
     total_score: float
     vetoed_dimension: str | None
     passed: bool
+    pass_threshold: float = 70.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,6 +283,7 @@ def recompute_article_score(
         total_score=total,
         vetoed_dimension=vetoed,
         passed=total >= rubric.pass_threshold and vetoed is None,
+        pass_threshold=rubric.pass_threshold,
     )
 
 
