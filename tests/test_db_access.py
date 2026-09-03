@@ -157,3 +157,4 @@ def test_result_insert_models_preserve_replay_metadata() -> None:
     assert run.entity_id == topic_id
     assert run.tokens_in == 100
     assert run.langfuse_trace_id == "trace-123"
+    assert run.agent_version == "topic-judge@v1"

@@ -23,6 +23,7 @@ from scholar_agents.runtime.structured import StructuredOutputError, complete_st
 
 RUBRIC_VERSION = "topic@v2"
 PROMPT_VERSION = "topic-judge@v2"
+AGENT_VERSION = "topic-judge@v1"
 
 
 class TopicJudgeError(ValueError):
@@ -121,10 +122,12 @@ def run_judge(
     prompt_version_override: str | None = None,
     rubric_version_override: str | None = None,
     weight_version_override: int | None = None,
+    agent_version_override: str | None = None,
 ) -> JudgeResult:
     with telemetry.span("rubric.load"):
         rubric = load_topic_rubric(rubric_path)
     prompt_version = _version_override(prompt_version_override, PROMPT_VERSION, "prompt")
+    agent_version = _version_override(agent_version_override, AGENT_VERSION, "agent")
     _validate_rubric_version(rubric.version, rubric_version_override)
     if pass_threshold_override is not None:
         if not 0 <= pass_threshold_override <= 100:
@@ -153,6 +156,7 @@ def run_judge(
             entity_type="topic",
             entity_id=topic.id,
             model=model,
+            agent_version=agent_version,
             prompt_version=prompt_version,
             tokens_in=0,
             tokens_out=0,
@@ -199,6 +203,7 @@ def run_judge(
                     entity_type="topic",
                     entity_id=topic.id,
                     model=model,
+                    agent_version=agent_version,
                     prompt_version=prompt_version,
                     tokens_in=usage.input_tokens,
                     tokens_out=usage.output_tokens,
@@ -225,6 +230,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
+                agent_version=agent_version,
                 prompt_version=prompt_version,
                 tokens_in=exc.usage.input_tokens,
                 tokens_out=exc.usage.output_tokens,
@@ -242,6 +248,7 @@ def run_judge(
                 entity_type="topic",
                 entity_id=topic.id,
                 model=model,
+                agent_version=agent_version,
                 prompt_version=prompt_version,
                 tokens_in=None,
                 tokens_out=None,

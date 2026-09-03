@@ -23,6 +23,7 @@ from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
 PROMPT_VERSION = "memory-reflector@v1"
+AGENT_VERSION = "memory-reflector@v1"
 ACTIVE_MIN_PUBLICATIONS = 5
 ACTIVE_MIN_CONFIDENCE = 0.65
 RETIRE_BELOW_CONFIDENCE = 0.35
@@ -100,6 +101,7 @@ def run_reflector(
             entity_type="weekly_report",
             entity_id=None,
             model=model,
+            agent_version=AGENT_VERSION,
             prompt_version=PROMPT_VERSION,
             tokens_in=0,
             tokens_out=0,
@@ -431,6 +433,7 @@ def _run(
         entity_type="weekly_report",
         entity_id=None,
         model=model,
+        agent_version=AGENT_VERSION,
         prompt_version=PROMPT_VERSION,
         tokens_in=usage.input_tokens,
         tokens_out=usage.output_tokens,

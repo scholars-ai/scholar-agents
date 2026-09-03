@@ -24,6 +24,7 @@ from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
 PROMPT_VERSION = "article-judge@v1"
+AGENT_VERSION = "article-judge@v1"
 
 
 class ArticleJudgeError(PermanentJobError):
@@ -111,9 +112,11 @@ def run_article_judge(
     prompt_version_override: str | None = None,
     rubric_version_override: str | None = None,
     weight_version_override: int | None = None,
+    agent_version_override: str | None = None,
 ) -> ArticleJudgeResult:
     rubric = load_article_rubric(rubric_path)
     prompt_version = _version_override(prompt_version_override, PROMPT_VERSION, "prompt")
+    agent_version = _version_override(agent_version_override, AGENT_VERSION, "agent")
     _validate_rubric_version(rubric.version, rubric_version_override)
     if pass_threshold_override is not None:
         if not 0 <= pass_threshold_override <= 100:
@@ -145,6 +148,7 @@ def run_article_judge(
             entity_type="article",
             entity_id=article.id,
             model=model,
+            agent_version=agent_version,
             prompt_version=prompt_version,
             tokens_in=0,
             tokens_out=0,
@@ -183,20 +187,38 @@ def run_article_judge(
         )
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, usage, "succeeded", prompt_version),
+            _run_update(
+                article.id,
+                model,
+                recorder.trace_id,
+                usage,
+                "succeeded",
+                prompt_version,
+                agent_version,
+            ),
         )
         recorder.score(name="article_total_score", value=score.total_score, comment=rationale)
         return ArticleJudgeResult(evaluation_id, run_id, usage, score)
     except StructuredOutputError as exc:
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, exc.usage, "failed", prompt_version),
+            _run_update(
+                article.id,
+                model,
+                recorder.trace_id,
+                exc.usage,
+                "failed",
+                prompt_version,
+                agent_version,
+            ),
         )
         raise
     except Exception:
         repository.update_agent_run(
             run_id,
-            _run_update(article.id, model, recorder.trace_id, usage, "failed", prompt_version),
+            _run_update(
+                article.id, model, recorder.trace_id, usage, "failed", prompt_version, agent_version
+            ),
         )
         raise
 
@@ -362,12 +384,14 @@ def _run_update(
     usage: Usage,
     status: AgentRunStatus,
     prompt_version: str = PROMPT_VERSION,
+    agent_version: str = AGENT_VERSION,
 ) -> AgentRunInsert:
     return AgentRunInsert(
         job_type="article.evaluate",
         entity_type="article",
         entity_id=article_id,
         model=model,
+        agent_version=agent_version,
         prompt_version=prompt_version,
         tokens_in=usage.input_tokens,
         tokens_out=usage.output_tokens,

@@ -279,6 +279,23 @@ class AgentRunInsert:
     langfuse_trace_id: str | None
     status: AgentRunStatus
     correlation_id: UUID | None = None
+    agent_version: str | None = None
+
+    def __post_init__(self) -> None:
+        # Keep old call sites safe while ensuring every built-in Agent gets a
+        # stable implementation identity in agent_runs.
+        if self.agent_version is not None:
+            return
+        defaults = {
+            "topic.scout": "topic-scout@v1",
+            "topic.evaluate": "topic-judge@v1",
+            "article.write": "article-writer@v1",
+            "article.evaluate": "article-judge@v1",
+            "memory.reflect": "memory-reflector@v1",
+        }
+        default = defaults.get(self.job_type)
+        if default is not None:
+            object.__setattr__(self, "agent_version", default)
 
 
 def _json_object(value: object) -> dict[str, Any]:
@@ -753,8 +770,9 @@ class AgentRepository:
                 """
                 insert into agent_runs
                     (job_type, entity_type, entity_id, langfuse_trace_id, model,
-                     prompt_version, tokens_in, tokens_out, cost_usd, status, correlation_id)
-                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::agent_run_status, %s)
+                     agent_version, prompt_version, tokens_in, tokens_out, cost_usd,
+                     status, correlation_id)
+                values (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::agent_run_status, %s)
                 returning id
                 """,
                 (
@@ -763,6 +781,7 @@ class AgentRepository:
                     run.entity_id,
                     run.langfuse_trace_id,
                     run.model,
+                    run.agent_version,
                     run.prompt_version,
                     run.tokens_in,
                     run.tokens_out,
@@ -782,6 +801,7 @@ class AgentRepository:
                 """
                 update agent_runs
                 set langfuse_trace_id = %s, model = %s, prompt_version = %s,
+                    agent_version = %s,
                     tokens_in = %s, tokens_out = %s, cost_usd = %s,
                     status = %s::agent_run_status, correlation_id = coalesce(%s, correlation_id),
                     updated_at = now()
@@ -791,6 +811,7 @@ class AgentRepository:
                     run.langfuse_trace_id,
                     run.model,
                     run.prompt_version,
+                    run.agent_version,
                     run.tokens_in,
                     run.tokens_out,
                     run.cost_usd,

@@ -21,6 +21,7 @@ from scholar_agents.providers.base import ModelProvider, Usage
 from scholar_agents.runtime.structured import StructuredOutputError, complete_structured
 
 DEFAULT_CLUSTER_THRESHOLD = 0.80
+AGENT_VERSION = "topic-scout@v1"
 
 
 class ScoutOutputError(ValueError):
@@ -191,6 +192,7 @@ def run_scout(
     embed_fn: EmbedFn | None = None,
     langfuse_trace_id: str | None = None,
     targeted: bool = False,
+    agent_version_override: str | None = None,
 ) -> ScoutResult:
     """运行一轮 TopicScout；调用方负责事务提交。"""
     if not items:
@@ -200,6 +202,9 @@ def run_scout(
     created_topics = 0
     clusters_processed = 0
     total_usage = Usage()
+    agent_version = (agent_version_override or AGENT_VERSION).strip()
+    if not agent_version:
+        raise ScoutOutputError("agent version override must not be empty")
     with telemetry.span("embedding.cluster"):
         clusters = cluster_raw_items(items)
     try:
@@ -250,6 +255,7 @@ def run_scout(
                 entity_type="raw_item_cluster",
                 entity_id=None,
                 model=model,
+                agent_version=agent_version,
                 prompt_version="topic-scout@v1",
                 tokens_in=total_usage.input_tokens,
                 tokens_out=total_usage.output_tokens,
@@ -266,6 +272,7 @@ def run_scout(
                 entity_type="raw_item_cluster",
                 entity_id=None,
                 model=model,
+                agent_version=agent_version,
                 prompt_version="topic-scout@v1",
                 tokens_in=total_usage.input_tokens,
                 tokens_out=total_usage.output_tokens,
@@ -282,6 +289,7 @@ def run_scout(
                 entity_type="raw_item_cluster",
                 entity_id=None,
                 model=model,
+                agent_version=agent_version,
                 prompt_version="topic-scout@v1",
                 tokens_in=total_usage.input_tokens,
                 tokens_out=total_usage.output_tokens,

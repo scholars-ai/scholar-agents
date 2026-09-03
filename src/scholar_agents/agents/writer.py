@@ -29,6 +29,7 @@ from scholar_agents.writing.formatter import FormattedArticle, WriterConstraintE
 from scholar_agents.writing.profiles import profile_prompt
 
 PROMPT_VERSION = "writer-orchestrator@v1"
+AGENT_VERSION = "article-writer@v1"
 MAX_MATERIAL_CHARACTERS = 20_000
 MAX_REFERENCE_CHARACTERS = 4_000
 
@@ -113,6 +114,7 @@ def run_writer(
     recorder: TraceRecorder,
     rewrite: RewriteContext | None = None,
     replay: bool = False,
+    agent_version_override: str | None = None,
 ) -> WriterResult:
     topic = repository.get_topic(topic_id)
     if topic is None:
@@ -156,12 +158,16 @@ def run_writer(
         f"{PROMPT_VERSION};profile={profile.id}@{profile.version};"
         f"outline={models.outline};draft={models.draft};critic={models.critic}"
     )
+    agent_version = (agent_version_override or AGENT_VERSION).strip()
+    if not agent_version:
+        raise PermanentJobError("agent version override must not be empty")
     run_id = repository.create_agent_run(
         AgentRunInsert(
             job_type="article.write",
             entity_type="topic",
             entity_id=topic.id,
             model=writer_agent,
+            agent_version=agent_version,
             prompt_version=PROMPT_VERSION,
             tokens_in=0,
             tokens_out=0,
@@ -246,18 +252,22 @@ def run_writer(
         )
         repository.update_agent_run(
             run_id,
-            _run_update(topic.id, writer_agent, recorder.trace_id, usage, "succeeded"),
+            _run_update(
+                topic.id, writer_agent, recorder.trace_id, usage, "succeeded", agent_version
+            ),
         )
         return WriterResult(article_id, run_id, usage, formatted)
     except StructuredOutputError as exc:
         _add_usage(usage, exc.usage)
         repository.update_agent_run(
-            run_id, _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed")
+            run_id,
+            _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed", agent_version),
         )
         raise
     except Exception:
         repository.update_agent_run(
-            run_id, _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed")
+            run_id,
+            _run_update(topic.id, writer_agent, recorder.trace_id, usage, "failed", agent_version),
         )
         raise
 
@@ -386,12 +396,14 @@ def _run_update(
     trace_id: str,
     usage: Usage,
     status: AgentRunStatus,
+    agent_version: str = AGENT_VERSION,
 ) -> AgentRunInsert:
     return AgentRunInsert(
         job_type="article.write",
         entity_type="topic",
         entity_id=topic_id,
         model=writer_agent,
+        agent_version=agent_version,
         prompt_version=PROMPT_VERSION,
         tokens_in=usage.input_tokens,
         tokens_out=usage.output_tokens,

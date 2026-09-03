@@ -498,6 +498,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
             max_topics=int(max_topics) if max_topics is not None else None,
             langfuse_trace_id=trace.trace_id,
             targeted=bool(raw_item_ids),
+            agent_version_override=_version_override(payload, "agentVersion"),
         )
 
 
@@ -545,6 +546,7 @@ def handle_topic_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> obj
             prompt_version_override=prompt_version,
             rubric_version_override=rubric_version,
             weight_version_override=weight_version,
+            agent_version_override=_version_override(payload, "agentVersion"),
         )
 
 
@@ -606,6 +608,7 @@ def handle_article_write(conn: Connection[Any], payload: dict[str, Any]) -> None
             recorder=trace,
             rewrite=job.rewrite,
             replay=bool(job.replay),
+            agent_version_override=_version_override(payload, "agentVersion"),
         )
 
 
@@ -658,6 +661,7 @@ def handle_article_evaluate(conn: Connection[Any], payload: dict[str, Any]) -> o
             prompt_version_override=prompt_version,
             rubric_version_override=rubric_version,
             weight_version_override=weight_version,
+            agent_version_override=_version_override(payload, "agentVersion"),
         )
 
 
