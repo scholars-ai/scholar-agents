@@ -44,6 +44,7 @@ log = structlog.get_logger()
 
 MAX_JOB_ATTEMPTS = 3
 DEFAULT_SCOUT_MAX_ITEMS = 20
+DEFAULT_SCOUT_MAX_CONCURRENCY = 6
 DEFAULT_JOB_TIMEOUT_SECONDS = 240.0
 DEFAULT_VISIBILITY_GRACE_SECONDS = 30
 
@@ -294,7 +295,7 @@ def _workflow_result_payload(queue: str, result: object, payload: dict[str, Any]
         output.update(result.as_dict())
         output["itemIds"] = [str(item_id) for item_id in result.item_ids]
     else:
-        for key in ("created_topics", "clusters_processed"):
+        for key in ("created_topics", "clusters_processed", "failed_clusters"):
             value = getattr(result, key, None)
             if value is not None:
                 output[key] = value
@@ -399,6 +400,19 @@ def _scout_item_limit(payload: dict[str, Any], raw_item_ids: list[UUID]) -> int:
     return int(value)
 
 
+def _scout_max_concurrency(payload: dict[str, Any]) -> int:
+    value = _override_int(payload, "maxConcurrency", "scoutMaxConcurrency")
+    if value is None:
+        raw = os.environ.get("SCOUT_MAX_CONCURRENCY", str(DEFAULT_SCOUT_MAX_CONCURRENCY))
+        try:
+            value = int(raw)
+        except ValueError:
+            value = DEFAULT_SCOUT_MAX_CONCURRENCY
+    if value < 1:
+        raise PermanentJobError("topic_scout max concurrency must be at least 1")
+    return value
+
+
 def _maybe_enqueue_workflow_scout(conn: Connection[Any], context: JobContext) -> None:
     """Release the topic_scout barrier only after every source in the run succeeded."""
     with conn.cursor(row_factory=dict_row) as cur:
@@ -499,6 +513,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
             langfuse_trace_id=trace.trace_id,
             targeted=bool(raw_item_ids),
             agent_version_override=_version_override(payload, "agentVersion"),
+            max_concurrency=_scout_max_concurrency(payload),
         )
 
 

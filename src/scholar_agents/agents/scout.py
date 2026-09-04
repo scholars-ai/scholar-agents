@@ -7,11 +7,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any, Protocol, cast
 from uuid import UUID
 
+import structlog
 from scholar_contracts.models import TopicDraft, TopicScoutOutput
 
 from scholar_agents import telemetry
@@ -22,6 +24,8 @@ from scholar_agents.runtime.structured import StructuredOutputError, complete_st
 
 DEFAULT_CLUSTER_THRESHOLD = 0.80
 AGENT_VERSION = "topic-scout@v1"
+DEFAULT_MAX_CONCURRENCY = 6
+log = structlog.get_logger()
 
 
 class ScoutOutputError(ValueError):
@@ -58,9 +62,31 @@ class ScoutResult:
     created_topics: int
     clusters_processed: int
     usage: Usage
+    failed_clusters: list[dict[str, Any]]
 
 
 EmbedFn = Callable[[str], list[float]]
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedCluster:
+    index: int
+    items: list[RawItemRecord]
+    system: str
+    user: str
+    schema: dict[str, Any]
+
+
+def _run_cluster(
+    prepared: _PreparedCluster, provider: ModelProvider, model: str
+) -> tuple[dict[str, Any], Usage]:
+    return complete_structured(
+        provider,
+        model,
+        prepared.system,
+        prepared.user,
+        prepared.schema,
+    )
 
 
 def cluster_raw_items(
@@ -193,38 +219,91 @@ def run_scout(
     langfuse_trace_id: str | None = None,
     targeted: bool = False,
     agent_version_override: str | None = None,
+    max_concurrency: int = DEFAULT_MAX_CONCURRENCY,
 ) -> ScoutResult:
     """运行一轮 TopicScout；调用方负责事务提交。"""
     if not items:
-        return ScoutResult(created_topics=0, clusters_processed=0, usage=Usage())
+        return ScoutResult(
+            created_topics=0, clusters_processed=0, usage=Usage(), failed_clusters=[]
+        )
+    if max_concurrency < 1:
+        raise ScoutOutputError("max concurrency must be at least 1")
 
     embedder = embed_fn or _default_embed
     created_topics = 0
     clusters_processed = 0
     total_usage = Usage()
+    failed_clusters: list[dict[str, Any]] = []
     agent_version = (agent_version_override or AGENT_VERSION).strip()
     if not agent_version:
         raise ScoutOutputError("agent version override must not be empty")
     with telemetry.span("embedding.cluster"):
         clusters = cluster_raw_items(items)
     try:
-        for cluster in clusters:
+        prepared_clusters: list[_PreparedCluster] = []
+        for index, cluster in enumerate(clusters):
             if max_topics is not None and created_topics >= max_topics:
                 break
-            clusters_processed += 1
             insight_embedding = _cluster_embedding(cluster)
             insights = repository.list_topic_insights(insight_embedding)
             system, user = build_scout_prompt(cluster, targeted=targeted, insights=insights)
-            data, usage = complete_structured(
-                provider,
-                model,
-                system,
-                user,
-                scout_output_schema(cluster),
+            prepared_clusters.append(
+                _PreparedCluster(
+                    index=index,
+                    items=cluster,
+                    system=system,
+                    user=user,
+                    schema=scout_output_schema(cluster),
+                )
             )
+
+        # maxTopics preserves the historical short-circuit semantics. Scheduled
+        # runs have no cap and can safely overlap provider calls.
+        if max_topics is None and max_concurrency > 1:
+            with ThreadPoolExecutor(max_workers=max_concurrency) as executor:
+                cluster_results = [
+                    (prepared, executor.submit(_run_cluster, prepared, provider, model))
+                    for prepared in prepared_clusters
+                ]
+        else:
+            cluster_results = [
+                (prepared, None) for prepared in prepared_clusters
+            ]
+
+        for prepared, future in cluster_results:
+            if max_topics is not None and created_topics >= max_topics:
+                break
+            cluster = prepared.items
+            clusters_processed += 1
+            try:
+                data, usage = (
+                    future.result()
+                    if future is not None
+                    else _run_cluster(prepared, provider, model)
+                )
+                drafts = parse_scout_output(data, cluster)
+            except (StructuredOutputError, ScoutOutputError) as exc:
+                usage = exc.usage if isinstance(exc, StructuredOutputError) else Usage()
+                failed_clusters.append(
+                    {
+                        "cluster_index": prepared.index,
+                        "raw_item_ids": [str(item.id) for item in cluster],
+                        "reason": str(exc)[:2000],
+                        "error_type": type(exc).__name__,
+                    }
+                )
+                log.warning(
+                    "topic_scout_cluster_failed",
+                    cluster_index=prepared.index,
+                    raw_item_count=len(cluster),
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+                total_usage.input_tokens += usage.input_tokens
+                total_usage.output_tokens += usage.output_tokens
+                continue
             total_usage.input_tokens += usage.input_tokens
             total_usage.output_tokens += usage.output_tokens
-            drafts = parse_scout_output(data, cluster)
             for draft in drafts:
                 if max_topics is not None and created_topics >= max_topics:
                     break
@@ -302,6 +381,7 @@ def run_scout(
         created_topics=created_topics,
         clusters_processed=clusters_processed,
         usage=total_usage,
+        failed_clusters=failed_clusters,
     )
 
 

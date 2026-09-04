@@ -15,6 +15,7 @@ from scholar_agents.agents.scout import (
     scout_output_schema,
 )
 from scholar_agents.db_access import RawItemRecord
+from scholar_agents.errors import ProviderError
 from scholar_agents.providers.base import ChatResponse, TextBlock, Usage
 
 
@@ -193,6 +194,19 @@ class FakeProvider:
         )
 
 
+class ErrorProvider:
+    name = "error"
+
+    def complete(self, model: str, request: object) -> ChatResponse:
+        del model, request
+        raise ProviderError(
+            "provider unavailable",
+            provider=self.name,
+            status_code=503,
+            retryable=True,
+        )
+
+
 class FakeRepository:
     def __init__(self) -> None:
         self.created_topics: list[dict[str, object]] = []
@@ -361,3 +375,51 @@ def test_run_scout_stops_processing_clusters_at_max_topics() -> None:
     assert result.clusters_processed == 1
     assert provider.calls == 1
     assert repository.clustered == [first.id]
+
+
+def test_run_scout_skips_invalid_cluster_and_keeps_other_clusters() -> None:
+    first = _item("无效输出事件", [1.0, 0.0])
+    second = _item("有效输出事件", [0.0, 1.0])
+    valid = json.dumps(
+        {
+            "topics": [
+                {
+                    "title": "有效选题",
+                    "angle": "实践角度",
+                    "summary": "摘要",
+                    "rawItemIds": [str(second.id)],
+                    "targetPlatforms": ["zhihu"],
+                }
+            ]
+        }
+    )
+    provider = FakeProvider([json.dumps({"topics": [{}]})] * 3 + [valid])
+    repository = FakeRepository()
+
+    result = run_scout(
+        [first, second],
+        provider,
+        "fake-model",
+        repository,
+        max_concurrency=1,
+        embed_fn=lambda text: [1.0, 0.0] if "有效" in text else [0.0, 1.0],
+    )
+
+    assert result.created_topics == 1
+    assert result.clusters_processed == 2
+    assert len(result.failed_clusters) == 1
+    assert result.failed_clusters[0]["error_type"] == "StructuredOutputError"
+    assert repository.clustered == [second.id]
+
+
+def test_run_scout_does_not_swallow_provider_errors() -> None:
+    repository = FakeRepository()
+
+    with pytest.raises(ProviderError, match="provider unavailable"):
+        run_scout(
+            [_item("事件", [1.0, 0.0])],
+            ErrorProvider(),
+            "fake-model",
+            repository,
+            embed_fn=lambda text: [1.0, 0.0],
+        )
