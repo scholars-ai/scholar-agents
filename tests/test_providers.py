@@ -158,7 +158,7 @@ class TestOpenAINormalization:
         assert resp.stop_reason == "end_turn"
         assert resp.usage.input_tokens == 10
 
-    def test_provider_sets_request_timeout_without_sdk_retries(
+    def test_provider_sets_request_timeout_and_transport_retries(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         constructor = MagicMock()
@@ -166,6 +166,13 @@ class TestOpenAINormalization:
         monkeypatch.setenv("LLM_REQUEST_TIMEOUT_SECONDS", "45")
         OpenAICompatProvider(api_key="test-key")
         assert constructor.call_args.kwargs["timeout"] == 45
+        assert constructor.call_args.kwargs["max_retries"] == 2
+
+    def test_provider_allows_disabling_sdk_retries(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        constructor = MagicMock()
+        monkeypatch.setattr("scholar_agents.providers.openai_provider.openai.OpenAI", constructor)
+        monkeypatch.setenv("LLM_REQUEST_MAX_RETRIES", "0")
+        OpenAICompatProvider(api_key="test-key")
         assert constructor.call_args.kwargs["max_retries"] == 0
 
     def test_tool_call_arguments_parsed_from_json_string(self) -> None:

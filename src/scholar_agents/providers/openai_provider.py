@@ -34,6 +34,7 @@ from scholar_agents.providers.base import (
 )
 
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+DEFAULT_REQUEST_MAX_RETRIES = 2
 
 
 def _request_timeout() -> float:
@@ -45,6 +46,17 @@ def _request_timeout() -> float:
     except ValueError:
         return DEFAULT_REQUEST_TIMEOUT_SECONDS
     return value if value > 0 else DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def _request_max_retries() -> int:
+    raw = os.environ.get("LLM_REQUEST_MAX_RETRIES", "")
+    if not raw:
+        return DEFAULT_REQUEST_MAX_RETRIES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_REQUEST_MAX_RETRIES
+    return value if value >= 0 else DEFAULT_REQUEST_MAX_RETRIES
 
 
 class OpenAICompatProvider:
@@ -61,7 +73,10 @@ class OpenAICompatProvider:
             api_key=api_key,
             base_url=base_url,
             timeout=_request_timeout(),
-            max_retries=0,
+            # The SDK only retries connection failures, 408/409/429, and 5xx.
+            # Authentication, billing, permission, and validation failures still
+            # surface immediately through normalize_provider_error.
+            max_retries=_request_max_retries(),
         )
 
     def complete(self, model: str, req: ChatRequest) -> ChatResponse:
