@@ -20,6 +20,7 @@ providers:
     base_url: https://cloud.vtrix.ai/llm/openai/v1
     api_key_env: VTRIX_API_KEY
     model_env: VTRIX_MODEL
+    json_mode: tool
   # 需要时解注释即可接入其他 OpenAI 兼容端点：
   # kimi:
   #   protocol: openai

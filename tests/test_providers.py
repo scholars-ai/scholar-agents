@@ -275,6 +275,7 @@ def test_production_quality_tasks_use_vtrix_gpt_5_6_sol() -> None:
 
     assert routing.providers["vtrix"].base_url == "https://cloud.vtrix.ai/llm/openai/v1"
     assert routing.providers["vtrix"].api_key_env == "VTRIX_API_KEY"
+    assert routing.providers["vtrix"].json_mode == "tool"
     for task in (
         "topic_scout",
         "writer_outline",
