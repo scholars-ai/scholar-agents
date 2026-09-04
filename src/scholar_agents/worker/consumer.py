@@ -476,7 +476,7 @@ def _maybe_enqueue_workflow_scout(conn: Connection[Any], context: JobContext) ->
 
 
 @handler("topic_scout")
-def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
+def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> object:
     with telemetry.span("topic_scout.process"):
         router = ModelRouter.from_yaml(_routing_config_path())
         provider, model = router.resolve("topic_scout")
@@ -504,7 +504,7 @@ def handle_topic_scout(conn: Connection[Any], payload: dict[str, Any]) -> None:
                 limit=_scout_item_limit(payload, raw_item_ids),
                 raw_item_ids=raw_item_ids or None,
             )
-        run_scout(
+        return run_scout(
             items,
             provider,
             model,

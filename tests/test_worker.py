@@ -70,6 +70,46 @@ def test_targeted_scout_keeps_all_requested_items() -> None:
     assert _scout_item_limit({}, item_ids) == len(item_ids)
 
 
+def test_topic_scout_handler_returns_result_for_workflow_audit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scholar_agents.worker import consumer
+
+    marker = object()
+
+    class FakeRouter:
+        @classmethod
+        def from_yaml(cls, _path: object) -> FakeRouter:
+            return cls()
+
+        def resolve(self, _task: str) -> tuple[object, str]:
+            return object(), "test-model"
+
+    class FakeTrace:
+        trace_id = "test-trace"
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def trace(self, **_kwargs: object) -> None:
+            pass
+
+    class FakeRepository:
+        def __init__(self, _conn: object) -> None:
+            pass
+
+        def list_new_raw_items(self, **_kwargs: object) -> list[object]:
+            return []
+
+    monkeypatch.setattr(consumer, "ModelRouter", FakeRouter)
+    monkeypatch.setattr(consumer, "TraceRecorder", FakeTrace)
+    monkeypatch.setattr(consumer, "ObservedProvider", lambda provider, *_args, **_kwargs: provider)
+    monkeypatch.setattr(consumer, "AgentRepository", FakeRepository)
+    monkeypatch.setattr(consumer, "run_scout", lambda *_args, **_kwargs: marker)
+
+    assert consumer.handle_topic_scout(object(), {}) is marker
+
+
 def test_workflow_overrides_are_typed_and_aliases_are_supported() -> None:
     from scholar_agents.worker.consumer import _override_model, _override_number
 
